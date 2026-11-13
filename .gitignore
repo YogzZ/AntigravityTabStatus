@@ -1,0 +1,16 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Extension packages & signing keys
+*.zip
+*.crx
+*.pem
+
+# Dependencies & local environment
+node_modules/
+.env*
+
+# Editors & IDEs
+.vscode/
+.idea/

@@ -1,0 +1,11 @@
+{
+  "extName": {
+    "message": "Antigravity Tab Status"
+  },
+  "extDescription": {
+    "message": "Antigravity 탭 상태 표시등: 순정·Gemini·Glow·Claude·Geek·Emoji 6종 스타일, 실시간 동기화 및 10개 언어 지원."
+  },
+  "actionTitle": {
+    "message": "Antigravity 탭 상태"
+  }
+}

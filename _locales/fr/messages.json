@@ -1,0 +1,11 @@
+{
+  "extName": {
+    "message": "Antigravity Tab Status"
+  },
+  "extDescription": {
+    "message": "Voyants d’onglet pour Antigravity : 6 styles (Antigravity, Gemini, Glow, Claude, Geek, Emoji), synchro live et 10 langues."
+  },
+  "actionTitle": {
+    "message": "Statut Antigravity"
+  }
+}
