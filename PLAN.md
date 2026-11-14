@@ -8,12 +8,12 @@ Core design pillars:
 
 1. **At-a-Glance Pure Status Lights:** Communicate task urgency (`waiting > unread > running > idle`) cleanly via tab favicons and toolbar badges, leaving `document.title` completely untouched.
 2. **Zero-Click Memory Accuracy:** Read collapsed and expanded projects directly from React 18/19 Fiber trees, TanStack Query caches, Zustand/Redux stores, and passive network streams in `world: "MAIN"` without expanding/collapsing sidebar accordions.
-3. **Strict CSP & Privacy Compliance:** Zero Blob Workers, zero `eval()`, zero remote analytics, and minimal MV3 permissions (`storage` + scoped Antigravity host permissions).
+3. **Strict CSP & Privacy Compliance:** Zero Blob Workers, zero `eval()`, zero remote analytics, and minimal MV3 permissions (`["storage", "sidePanel"]` + scoped Antigravity host permissions, never `tabs` or `<all_urls>`).
 4. **Global Accessibility & Localization:** Automatic 10-language UI support, WCAG AA light/dark themes, Windows Forced Colors compatibility, and `prefers-reduced-motion` safety.
 
 ---
 
-## 2. v2.6.0–v2.7.0 Architectural Design Breakdown
+## 2. v2.6.0–v2.8.0 Architectural Design Breakdown
 
 ### 2.1 Pure Status Light System (`content.js`, `background.js`)
 - **Zero Tab Title Clutter (v2.6.0+):** `syncTabTitlePresentation()` never appends status text to `document.title`; it only strips legacy v2.5 suffixes (`TITLE_SUFFIX_RE`) so tabs keep their clean original titles.
@@ -48,7 +48,7 @@ Each style is mirrored in the popup's 2x3 style picker (`popup.html` / `popup.cs
 ### 2.3 Automatic 10-Language i18n (`i18n.js`, `_locales/*/messages.json`)
 - Detects browser UI language via `chrome.i18n.getUILanguage()` / `navigator.languages` / `navigator.language`.
 - Normalizes automatically to 10 supported locales: `en`, `zh_CN`, `zh_TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt_BR`, `ru`.
-- `window.__AGY_I18N__` localizes `popup.html` (`[data-i18n*]`), `popup.js`, `content.js`, `scanner.js`, and structured `reasonCode` payloads emitted by `page-bridge.js` across `118` canonical keys with 100% parity, while setting canonical BCP-47 `<html lang="...">`.
+- `window.__AGY_I18N__` localizes `popup.html` & `sidepanel.html` (`[data-i18n*]`), `popup.js`, `content.js`, `scanner.js`, and structured `reasonCode` payloads emitted by `page-bridge.js` across `129` canonical keys with 100% parity, while setting canonical BCP-47 `<html lang="...">`.
 - Chrome extension metadata (`extName`, `extDescription`, `actionTitle`) lives in `_locales/<locale>/messages.json` using underscore folder names (`extDescription` kept `<= 132` chars for store compliance).
 
 ### 2.4 React Fiber Memory Bridge (`page-bridge.js`, `scanner.js`, `frame-detector.js`)
@@ -57,10 +57,15 @@ Each style is mirrored in the popup's 2x3 style picker (`popup.html` / `popup.cs
 - `scanner.js` merges memory snapshots, expanded-state memory caches, and optional collapsed probing (`autoProbeCollapsed` or manual sync), while preserving bilingual English/Chinese DOM scraping regexes.
 
 ### 2.5 Open-Source Readiness
-- `AGENTS.md`: Contributor & AI agent engineering rules, Browser Support Policy (Chromium 120+), CSP/MV3 constraints, and local verification commands.
+- `LICENSE`: Open-source **MIT License**.
+- `PRIVACY.md`: Clear privacy & local-storage disclosure for repository users and Web Store review.
+- `CHANGELOG.md`: Release history documenting `v2.6.0` and `v2.7.0`.
+- `CHROMEWEBSTORE.md`: Store listing copy, permission justifications, privacy declarations, and submission checklist.
+- `AGENTS.md`: Contributor & AI agent engineering rules, Browser Support Policy (Chromium 120+), CSP/MV3 constraints, and verification commands.
 - `PLAN.md`: Architecture breakdown and milestone roadmap.
 - `README.md` & `README.zh-CN.md`: Bilingual user & developer documentation with mutual language switchers.
-- `.gitignore`: Standard ignores for OS files, build archives (`*.zip`, `*.crx`, `*.pem`), `node_modules/`, `.env*`, and IDE folders.
+- `scripts/verify.mjs`, `scripts/package.sh`, & `.github/workflows/ci.yml`: Zero-dependency Node verification suite, reproducible clean `.zip` release packager (`dist/`), and automated CI workflow.
+- `.gitignore`: Standard ignores for OS files, build archives (`dist/`, `*.zip`, `*.crx`, `*.pem`), logs (`*.log`), `node_modules/`, `.env*`, and IDE folders.
 
 ---
 
@@ -69,7 +74,8 @@ Each style is mirrored in the popup's 2x3 style picker (`popup.html` / `popup.cs
 | Milestone | Target | Scope & Deliverables | Status |
 | :--- | :--- | :--- | :--- |
 | **M1 — v2.6.0 Core & Docs** | Completed | Pure status lights (`glow`, `claude`, `geek`, `emoji`), `standalone` / `badge` mount modes, 10-language auto-switching (`i18n.js` + `_locales/`, 114 keys), `AGENTS.md`, `PLAN.md`, `README.md`, `README.zh-CN.md`, `.gitignore`. | **Completed** |
-| **M1.1 — v2.7.0 Native First-Party Themes** | Current | Adds `antigravity` (`antigravity.google.com` workspace squircle icons) and `gemini` (`gemini.google.com/app` 4-pointed concave sparkle) across Running / Unread / Waiting, 2x3 popup style grid, and 118-key 10-locale parity. | **Current** |
-| **M2 — Automated CI & Verification** | Next | Node-based unit & smoke test suite (i18n key parity, `_locales` validation, DOM/Canvas/Chrome API mocks, zero-title-text assertions) + GitHub Actions workflow to build clean release `.zip` artifacts excluding dev/agent docs. | Planned |
-| **M3 — Store Publishing Readiness** | Upcoming | Chrome Web Store & Microsoft Edge Add-ons readiness: `CHROMEWEBSTORE.md` (store copy, permission justifications, privacy policy), promotional 1280x800 screenshots, and repository `LICENSE` selection. | Planned |
+| **M1.1 — v2.7.0 Native First-Party Themes** | Completed | Adds `antigravity` (`antigravity.google.com` workspace squircle icons) and `gemini` (`gemini.google.com/app` 4-pointed concave sparkle) across Running / Unread / Waiting, 2x3 popup style grid, and 118-key 10-locale parity. | **Completed** |
+| **M2 — Automated CI & Verification** | Completed | Zero-dependency Node verification suite (`scripts/verify.mjs`: syntax, MV3/scoped permissions, `_locales` & 129-key i18n parity, CSP/postMessage safety, PNG integrity/permissions, PII leak check) + `scripts/package.sh` + GitHub Actions workflow `.github/workflows/ci.yml`. | **Completed** |
+| **M2.5 — v2.8.0 Cross-Tab Panel & Side Panel** | Completed | Global Antigravity instance discovery across all windows without `"tabs"` permission, Chrome `Side Panel` (`sidepanel.html`) with container queries & `100dvh` layout, `chrome.storage.session` global toolbar badge aggregation, multi-instance switcher (`All` + per-tab pills), one-click cross-tab activation, and `actionClickMode` toggle. | **Completed** |
+| **M3 — Store Publishing Readiness** | Current | Scoped Antigravity origin injection (no `<all_urls>`), MIT `LICENSE`, `PRIVACY.md`, `CHANGELOG.md`, `CHROMEWEBSTORE.md` store copy & permission justifications, and clean `dist/` release zip; remaining manual step: capture 1280x800 promotional screenshots & submit in Developer Dashboard. | **Current** |
 | **M4 — Community Polish** | Future | Community-contributed light themes, optional opt-in desktop/audio notifications on `waiting` / `unread`, and Firefox MV3 compatibility study. | Exploring |

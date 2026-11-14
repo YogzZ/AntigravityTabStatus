@@ -3,9 +3,13 @@
 Thumbs.db
 
 # Extension packages & signing keys
+dist/
 *.zip
 *.crx
 *.pem
+
+# Logs
+*.log
 
 # Dependencies & local environment
 node_modules/

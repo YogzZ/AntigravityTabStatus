@@ -1,10 +1,10 @@
 /**
- * Antigravity Tab Status - Main World Lightweight React Memory & Stream Bridge (v2.6.0)
+ * Antigravity Tab Status - Main World Lightweight React Memory & Stream Bridge (v2.7.0)
  *
  * 优雅、零 UI 点击、高性能的内存直读架构：
  * - 非 Antigravity 页面首行 0.01ms 立即退出
  * - 通过 Manifest V3 原生 `world: "MAIN"` 注入（零内联脚本，100% 兼容严格 CSP）
- * - 支持毫秒级结果缓存与节流（默认 550ms 内重复查询直接 O(1) 返回，几乎零 CPU 占用）
+ * - 支持毫秒级结果缓存与节流（默认 500ms 内重复查询直接 O(1) 返回，几乎零 CPU 占用）
  * - 精准直读 React 18/19 内存树（解决深度截断、Context dependencies 与字典映射问题）：
  *   1) 沿 `.return` 完整回溯至 HostRoot，识别高层 Context.Provider (`tag === 10`) 与 `dependencies.firstContext` (`useContext`)
  *   2) 识别 TanStack `QueryClient`、Redux/Zustand `Store` 与标准化字典 `{ [convId]: { summary, status, workspaceUris } }`
@@ -13,8 +13,8 @@
 
 (() => {
   const isTop = window.top === window.self;
-  const AGY_HOST_RE = /^([a-z0-9-]+\.)?antigravity\.google(\.com)?$/i;
-  const AGY_ORIGIN_RE = /^https:\/\/([a-z0-9-]+\.)?antigravity\.google(\.com)?$/i;
+  const AGY_HOST_RE = /^(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
 
   if (isTop) {
     if (!AGY_HOST_RE.test(window.location.hostname || '')) return;
@@ -33,10 +33,22 @@
   const GENERIC_CONTAINER_KEY_RE =
     /^(data|state|props|value|result|items|list|map|cache|meta|metadata|config|options|headers|children|style|theme|styles|actions|dispatch|subscribe|getState|queryClient|client|store|current|firstContext|dependencies)$/i;
 
-  // 网络层被动观测到的项目与对话字典（只读克隆，绝不篡改原请求/响应）
+  // 网络层被动观测到的项目与对话字典（只读克隆，绝不篡改原请求/响应，限制上限防止长期驻留增长）
   const netProjectsById = new Map();
   const netProjectsByName = new Map();
   const netConvsById = new Map();
+  const MAX_NET_CACHE_ENTRIES = 1000;
+
+  function pruneMapToLimit(map, limit = MAX_NET_CACHE_ENTRIES) {
+    if (!map || map.size <= limit) return;
+    const excess = map.size - limit;
+    let deleted = 0;
+    for (const key of map.keys()) {
+      map.delete(key);
+      deleted += 1;
+      if (deleted >= excess) break;
+    }
+  }
 
   // 性能优化：桥接器结果短时缓存（同一渲染周期多次 Mutation 合并为 0.02ms 缓存命中）
   const BRIDGE_CACHE_TTL_MS = 500;
@@ -109,50 +121,57 @@
   function summarizeConvDebugFields(c) {
     if (!c || typeof c !== 'object') return {};
     const out = {};
-    const keys = Object.keys(c);
+    let keys;
+    try {
+      keys = Object.keys(c);
+    } catch {
+      return out;
+    }
     let count = 0;
     for (let i = 0; i < keys.length && count < 14; i++) {
       const k = keys[i];
-      if (k === 'steps' || k === 'messages') {
-        const arr = c[k];
-        if (Array.isArray(arr)) {
-          out[k] = `Array(${arr.length})`;
-          count++;
-          if (k === 'steps' && arr.length > 0) {
-            const last = arr[arr.length - 1];
-            if (last && typeof last === 'object') {
-              const lastMeta = {};
-              if (last.status != null) lastMeta.status = String(last.status).slice(0, 64);
-              if (last.stepStatus != null) lastMeta.stepStatus = String(last.stepStatus).slice(0, 64);
-              if (last.type != null) lastMeta.type = String(last.type).slice(0, 64);
-              if (last.waitingForUser != null) lastMeta.waitingForUser = Boolean(last.waitingForUser);
-              if (Object.keys(lastMeta).length > 0) {
-                out.lastStepMeta = lastMeta;
-                count++;
+      try {
+        if (k === 'steps' || k === 'messages') {
+          const arr = c[k];
+          if (Array.isArray(arr)) {
+            out[k] = `Array(${arr.length})`;
+            count++;
+            if (k === 'steps' && arr.length > 0) {
+              const last = arr[arr.length - 1];
+              if (last && typeof last === 'object') {
+                const lastMeta = {};
+                if (last.status != null) lastMeta.status = String(last.status).slice(0, 64);
+                if (last.stepStatus != null) lastMeta.stepStatus = String(last.stepStatus).slice(0, 64);
+                if (last.type != null) lastMeta.type = String(last.type).slice(0, 64);
+                if (last.waitingForUser != null) lastMeta.waitingForUser = Boolean(last.waitingForUser);
+                if (Object.keys(lastMeta).length > 0) {
+                  out.lastStepMeta = lastMeta;
+                  count++;
+                }
               }
             }
           }
+          continue;
         }
-        continue;
-      }
-      if (!DEBUG_STATUS_KEY_RE.test(k)) continue;
-      if (/title|summary|headline|topic|subject|uri|path|body|content|text|prompt|html/i.test(k)) continue;
-      const v = c[k];
-      if (v === undefined) continue;
-      if (v === null || typeof v === 'boolean' || typeof v === 'number') {
-        out[k] = v;
-        count++;
-      } else if (typeof v === 'string') {
-        out[k] = v.slice(0, 64);
-        count++;
-      } else if (Array.isArray(v)) {
-        out[k] = `Array(${v.length})`;
-        count++;
-      } else if (typeof v === 'object') {
-        const nestedKeys = Object.keys(v).slice(0, 5).join(',');
-        out[k] = nestedKeys ? `{${nestedKeys}}` : '{}';
-        count++;
-      }
+        if (!DEBUG_STATUS_KEY_RE.test(k)) continue;
+        if (/title|summary|headline|topic|subject|uri|path|body|content|text|prompt|html/i.test(k)) continue;
+        const v = c[k];
+        if (v === undefined) continue;
+        if (v === null || typeof v === 'boolean' || typeof v === 'number') {
+          out[k] = v;
+          count++;
+        } else if (typeof v === 'string') {
+          out[k] = v.slice(0, 64);
+          count++;
+        } else if (Array.isArray(v)) {
+          out[k] = `Array(${v.length})`;
+          count++;
+        } else if (typeof v === 'object') {
+          const nestedKeys = Object.keys(v).slice(0, 5).join(',');
+          out[k] = nestedKeys ? `{${nestedKeys}}` : '{}';
+          count++;
+        }
+      } catch {}
     }
     return out;
   }
@@ -176,56 +195,65 @@
     const out = [];
     if (!obj || typeof obj !== 'object') return out;
     for (const f of fields) {
-      const v = obj[f];
-      if (typeof v === 'string' && v.trim()) {
-        out.push(v.trim().toUpperCase());
-      }
+      try {
+        const v = obj[f];
+        if (typeof v === 'string' && v.trim()) {
+          out.push(v.trim().toUpperCase());
+        }
+      } catch {}
     }
     return out;
   }
 
+  const WAITING_BOOL_KEYS = [
+    'waiting',
+    'waitingForUser',
+    'waitingForInput',
+    'waitingOnUser',
+    'isWaiting',
+    'isWaitingForUser',
+    'isWaitingForInput',
+    'needsApproval',
+    'needsInput',
+    'needsReview',
+    'needsUserAction',
+    'needsConfirmation',
+    'pendingApproval',
+    'hasPendingApproval',
+    'hasPendingInput',
+    'hasPendingQuestion',
+    'hasPendingReview',
+    'hasPendingInteraction',
+    'hasPendingUserAction',
+    'hasPendingAction',
+    'pendingUserAction',
+    'userInputRequired',
+    'requiresUserAction',
+    'attentionRequired',
+    'needsAttention',
+    'hasUnreadApproval',
+    'actionRequired',
+    'userActionRequired',
+    'isBlocked',
+    'blockedOnUser',
+    'askingQuestion',
+    'awaitingUser',
+    'awaitingInput',
+    'awaitingApproval',
+    'awaitingReview',
+    'requiresApproval',
+    'requiresInput',
+    'requiresReview'
+  ];
+
   function hasWaitingBool(obj) {
     if (!obj || typeof obj !== 'object') return false;
-    return (
-      obj.waiting === true ||
-      obj.waitingForUser === true ||
-      obj.waitingForInput === true ||
-      obj.waitingOnUser === true ||
-      obj.isWaiting === true ||
-      obj.isWaitingForUser === true ||
-      obj.isWaitingForInput === true ||
-      obj.needsApproval === true ||
-      obj.needsInput === true ||
-      obj.needsReview === true ||
-      obj.needsUserAction === true ||
-      obj.needsConfirmation === true ||
-      obj.pendingApproval === true ||
-      obj.hasPendingApproval === true ||
-      obj.hasPendingInput === true ||
-      obj.hasPendingQuestion === true ||
-      obj.hasPendingReview === true ||
-      obj.hasPendingInteraction === true ||
-      obj.hasPendingUserAction === true ||
-      obj.hasPendingAction === true ||
-      obj.pendingUserAction === true ||
-      obj.userInputRequired === true ||
-      obj.requiresUserAction === true ||
-      obj.attentionRequired === true ||
-      obj.needsAttention === true ||
-      obj.hasUnreadApproval === true ||
-      obj.actionRequired === true ||
-      obj.userActionRequired === true ||
-      obj.isBlocked === true ||
-      obj.blockedOnUser === true ||
-      obj.askingQuestion === true ||
-      obj.awaitingUser === true ||
-      obj.awaitingInput === true ||
-      obj.awaitingApproval === true ||
-      obj.awaitingReview === true ||
-      obj.requiresApproval === true ||
-      obj.requiresInput === true ||
-      obj.requiresReview === true
-    );
+    for (const key of WAITING_BOOL_KEYS) {
+      try {
+        if (obj[key] === true) return true;
+      } catch {}
+    }
+    return false;
   }
 
   function stepHasUnansweredWaitingTool(step) {
@@ -769,6 +797,10 @@
       isDetailRecord: Boolean(isDetailRecord),
       isTerminal: Boolean(isTerminal),
       debugFields: debugFields || {},
+      // 对话推进指纹：提问后用户一旦回答，steps/messages 数量一定增长；缓存里的旧快照
+      // 数量不会变。mergeConvRecord 靠它判断一个 running 详情是不是提问前的旧快照。
+      stepsCount: Array.isArray(obj.steps) ? obj.steps.length : null,
+      messagesCount: Array.isArray(obj.messages) ? obj.messages.length : null,
       timeText: typeof rawTime === 'string' ? rawTime : '',
       href
     };
@@ -814,19 +846,41 @@
     return out;
   }
 
+  // 对话在 waiting 之后是否真正推进过：只有 steps/messages 数量比记录 waiting 时增长了，
+  // 才说明提问已被回答、会话重新开跑。缓存里的旧快照数量不会增长，不能据此清除 waiting。
+  function hasProgressedBeyondWaiting(prev, next) {
+    const stepsGrew =
+      typeof next.stepsCount === 'number' &&
+      typeof prev.waitingSteps === 'number' &&
+      next.stepsCount > prev.waitingSteps;
+    const messagesGrew =
+      typeof next.messagesCount === 'number' &&
+      typeof prev.waitingMessages === 'number' &&
+      next.messagesCount > prev.waitingMessages;
+    return stepsGrew || messagesGrew;
+  }
+
   function mergeConvRecord(prev, next, { preferLatestExplicit = false } = {}) {
     if (!prev) {
-      return {
+      const rec = {
         ...next,
         debugFields: mergeDebugFields(null, next.debugFields, Boolean(next.isDetailRecord), false)
       };
+      if (next.state === 'waiting') {
+        if (typeof next.stepsCount === 'number') rec.waitingSteps = next.stepsCount;
+        if (typeof next.messagesCount === 'number') rec.waitingMessages = next.messagesCount;
+      }
+      return rec;
     }
     const rank = { waiting: 4, unread: 3, running: 2, idle: 1 };
     let takeNextState = false;
 
     if (prev.state === 'waiting' && next.state === 'running') {
-      // waiting 是粘性的：粗粒度列表摘要的 RUNNING 绝不能降级已确认的 waiting，只有详情记录才能覆盖
-      takeNextState = Boolean(preferLatestExplicit && next.isDetailRecord);
+      // waiting 是粘性的：粗粒度列表摘要与提问前缓存的旧详情快照都不得降级 waiting，
+      // 只有 steps/messages 数量真正增长后的详情 running 才能清除 waiting。
+      takeNextState = Boolean(
+        preferLatestExplicit && next.isDetailRecord && hasProgressedBeyondWaiting(prev, next)
+      );
     } else if (prev.state === 'waiting' && (next.state === 'idle' || next.state === 'unread')) {
       // 终态（IDLE / DONE / COMPLETED）或未读、或详情显式回到 idle 才清除 waiting
       takeNextState = Boolean(preferLatestExplicit && (next.isTerminal || next.isDetailRecord));
@@ -838,8 +892,39 @@
       takeNextState = true;
     } else if (!next.hasExplicitStatus && prev.hasExplicitStatus) {
       takeNextState = false;
-    } else if ((rank[next.state] || 0) >= (rank[prev.state] || 0)) {
+    } else if ((rank[next.state] || 0) > (rank[prev.state] || 0)) {
       takeNextState = true;
+    } else if ((rank[next.state] || 0) === (rank[prev.state] || 0)) {
+      takeNextState = Boolean(next.isDetailRecord || !prev.isDetailRecord);
+    }
+
+    const resultState = takeNextState ? next.state : prev.state;
+    const sameState = resultState === prev.state && resultState === next.state;
+    const pickCount = (field) => {
+      const nextVal = next[field];
+      const prevVal = prev[field];
+      if (takeNextState || sameState) {
+        if (next.isDetailRecord && typeof nextVal === 'number') return nextVal;
+        if (!prev.isDetailRecord && typeof nextVal === 'number') return nextVal;
+      }
+      return typeof prevVal === 'number'
+        ? prevVal
+        : (takeNextState || sameState) && typeof nextVal === 'number'
+          ? nextVal
+          : null;
+    };
+    const stepsCount = pickCount('stepsCount');
+    const messagesCount = pickCount('messagesCount');
+
+    let waitingSteps = takeNextState ? (next.waitingSteps ?? prev.waitingSteps) : prev.waitingSteps;
+    let waitingMessages = takeNextState ? (next.waitingMessages ?? prev.waitingMessages) : prev.waitingMessages;
+    if (resultState === 'waiting') {
+      const src = takeNextState ? next : prev;
+      if (typeof src.stepsCount === 'number') waitingSteps = src.stepsCount;
+      if (typeof src.messagesCount === 'number') waitingMessages = src.messagesCount;
+    } else if (prev.state === 'waiting' && takeNextState) {
+      waitingSteps = undefined;
+      waitingMessages = undefined;
     }
 
     return {
@@ -847,13 +932,19 @@
       title: next.title || prev.title,
       projectId: next.projectId || prev.projectId,
       projectName: next.projectName || prev.projectName,
-      state: takeNextState ? next.state : prev.state,
+      state: resultState,
       reasonCode: takeNextState ? next.reasonCode : prev.reasonCode,
       reasonVars: takeNextState ? next.reasonVars : prev.reasonVars,
       reason: takeNextState ? next.reason : prev.reason,
       hasExplicitStatus: Boolean(prev.hasExplicitStatus || next.hasExplicitStatus),
-      isDetailRecord: Boolean(takeNextState ? next.isDetailRecord : prev.isDetailRecord),
+      isDetailRecord: Boolean(
+        sameState ? (prev.isDetailRecord || next.isDetailRecord) : (takeNextState ? next.isDetailRecord : prev.isDetailRecord)
+      ),
       isTerminal: Boolean(takeNextState ? next.isTerminal : prev.isTerminal),
+      stepsCount,
+      messagesCount,
+      waitingSteps,
+      waitingMessages,
       debugFields: mergeDebugFields(
         prev.debugFields,
         next.debugFields,
@@ -863,6 +954,16 @@
       timeText: next.timeText || prev.timeText,
       href: next.href || prev.href
     };
+  }
+
+  function isBlockedBridgeValue(val) {
+    if (!val || typeof val !== 'object') return true;
+    try {
+      if (val === window || val === window.top || val === window.parent) return true;
+    } catch {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -881,149 +982,157 @@
     let budget = 1400;
 
     function walk(val, depth, curProjId, curProjName, parentKey = '') {
-      if (budget <= 0 || depth > 8 || !val || typeof val !== 'object') return;
-      if (val instanceof Node || val instanceof Window || val.$$typeof) return;
-      if (visited.has(val)) return;
-      visited.add(val);
-      budget--;
+      if (budget <= 0 || depth > 8 || isBlockedBridgeValue(val)) return;
+      try {
+        if (val instanceof Node || val instanceof Window || val.$$typeof) return;
+        if (visited.has(val)) return;
+        visited.add(val);
+        budget--;
 
-      if (val instanceof Map) {
-        for (const [k, v] of val.entries()) {
-          const keyStr = typeof k === 'string' ? k : '';
-          const matchedProjById = keyStr ? outProjects.byId.get(keyStr) : null;
-          let nextProjId = matchedProjById ? matchedProjById.id : curProjId;
-          let nextProjName = matchedProjById ? matchedProjById.name : curProjName;
-          if (!matchedProjById && keyStr) {
-            const lowK = extractBasenameFromUri(keyStr).toLowerCase();
-            if (knownLowerNames.has(lowK)) {
-              nextProjName = lowerToCanonical ? lowerToCanonical.get(lowK) || lowK : lowK;
+        if (val instanceof Map) {
+          for (const [k, v] of val.entries()) {
+            const keyStr = typeof k === 'string' ? k : '';
+            const matchedProjById = keyStr ? outProjects.byId.get(keyStr) : null;
+            let nextProjId = matchedProjById ? matchedProjById.id : curProjId;
+            let nextProjName = matchedProjById ? matchedProjById.name : curProjName;
+            if (!matchedProjById && keyStr) {
+              const lowK = extractBasenameFromUri(keyStr).toLowerCase();
+              if (knownLowerNames.has(lowK)) {
+                nextProjName = lowerToCanonical ? lowerToCanonical.get(lowK) || lowK : lowK;
+              }
+            }
+            walk(v, depth + 1, nextProjId, nextProjName, keyStr);
+          }
+          return;
+        }
+
+        if (val instanceof Set) {
+          for (const item of val.values()) {
+            walk(item, depth + 1, curProjId, curProjName, '');
+          }
+          return;
+        }
+
+        if (Array.isArray(val)) {
+          for (let i = 0; i < val.length && i < 120; i++) {
+            walk(val[i], depth + 1, curProjId, curProjName, '');
+          }
+          return;
+        }
+
+        let nextProjId = curProjId;
+        let nextProjName = curProjName;
+
+        // 识别 Project 对象
+        try {
+          const maybeName = String(
+            val.projectName ??
+              val.workspaceName ??
+              val.repoName ??
+              val.displayName ??
+              val.name ??
+              val.title ??
+              val.label ??
+              extractBasenameFromUri(val.uri ?? val.workspaceUri ?? val.rootUri ?? '') ??
+              ''
+          )
+            .replace(/\s+/g, ' ')
+            .trim();
+          const lowerName = maybeName.toLowerCase();
+
+          if (maybeName && (knownLowerNames.size === 0 || knownLowerNames.has(lowerName))) {
+            const pid = String(val.projectId ?? val.workspaceId ?? val.id ?? '').trim();
+            const pType = inferProjectType(val);
+            const childArr =
+              val.conversations ??
+              val.cascades ??
+              val.trajectories ??
+              val.threads ??
+              val.sessions ??
+              val.chats ??
+              val.tasks;
+
+            if (pid || pType || Array.isArray(childArr)) {
+              const canonical = lowerToCanonical?.get(lowerName) || maybeName;
+              const rec = outProjects.byName.get(lowerName) || {
+                id: pid,
+                name: canonical,
+                projectType: pType || null,
+                hasEmptyArray: false
+              };
+              if (pid && !rec.id) rec.id = pid;
+              if (pType) rec.projectType = pType;
+              if (Array.isArray(childArr) && childArr.length === 0) {
+                rec.hasEmptyArray = true;
+              }
+              outProjects.byName.set(lowerName, rec);
+              if (rec.id) outProjects.byId.set(rec.id, rec);
+
+              nextProjId = rec.id || curProjId;
+              nextProjName = rec.name;
             }
           }
-          walk(v, depth + 1, nextProjId, nextProjName, keyStr);
-        }
-        return;
-      }
+        } catch {}
 
-      if (val instanceof Set) {
-        for (const item of val.values()) {
-          walk(item, depth + 1, curProjId, curProjName, '');
-        }
-        return;
-      }
-
-      if (Array.isArray(val)) {
-        for (let i = 0; i < val.length && i < 120; i++) {
-          walk(val[i], depth + 1, curProjId, curProjName, '');
-        }
-        return;
-      }
-
-      // 识别 Project 对象
-      const maybeName = String(
-        val.projectName ??
-          val.workspaceName ??
-          val.repoName ??
-          val.displayName ??
-          val.name ??
-          val.title ??
-          val.label ??
-          extractBasenameFromUri(val.uri ?? val.workspaceUri ?? val.rootUri ?? '') ??
-          ''
-      )
-        .replace(/\s+/g, ' ')
-        .trim();
-      const lowerName = maybeName.toLowerCase();
-
-      let nextProjId = curProjId;
-      let nextProjName = curProjName;
-
-      if (maybeName && (knownLowerNames.size === 0 || knownLowerNames.has(lowerName))) {
-        const pid = String(val.projectId ?? val.workspaceId ?? val.id ?? '').trim();
-        const pType = inferProjectType(val);
-        const childArr =
-          val.conversations ??
-          val.cascades ??
-          val.trajectories ??
-          val.threads ??
-          val.sessions ??
-          val.chats ??
-          val.tasks;
-
-        if (pid || pType || Array.isArray(childArr)) {
-          const canonical = lowerToCanonical?.get(lowerName) || maybeName;
-          const rec = outProjects.byName.get(lowerName) || {
-            id: pid,
-            name: canonical,
-            projectType: pType || null,
-            hasEmptyArray: false
-          };
-          if (pid && !rec.id) rec.id = pid;
-          if (pType) rec.projectType = pType;
-          if (Array.isArray(childArr) && childArr.length === 0) {
-            rec.hasEmptyArray = true;
-          }
-          outProjects.byName.set(lowerName, rec);
-          if (rec.id) outProjects.byId.set(rec.id, rec);
-
-          nextProjId = rec.id || curProjId;
-          nextProjName = rec.name;
-        }
-      }
-
-      // 识别 Conversation 对象（兼容字典键作 convId 的情况）
-      const fallbackConvId =
-        parentKey && parentKey.length >= 4 && !GENERIC_CONTAINER_KEY_RE.test(parentKey)
-          ? parentKey
-          : '';
-      if (looksLikeConversationObject(val, fallbackConvId)) {
-        const conv = extractConvRecord(
-          val,
-          nextProjId,
-          nextProjName,
-          fallbackConvId,
-          knownLowerNames,
-          lowerToCanonical
-        );
-        const key = getConvMergeKey(conv);
-        const prev = outConvs.get(key);
-        outConvs.set(key, mergeConvRecord(prev, conv));
-        return;
-      }
-
-      // 遍历普通对象键值
-      const keys = Object.keys(val);
-      for (let i = 0; i < keys.length && i < 65; i++) {
-        const k = keys[i];
-        if (
-          k.startsWith('_') ||
-          k === 'children' ||
-          k === 'stateNode' ||
-          k === 'return' ||
-          k === 'sibling' ||
-          k === 'child'
-        ) {
-          continue;
-        }
-        let childVal;
+        // 识别 Conversation 对象（兼容字典键作 convId 的情况）
+        const fallbackConvId =
+          parentKey && parentKey.length >= 4 && !GENERIC_CONTAINER_KEY_RE.test(parentKey)
+            ? parentKey
+            : '';
         try {
-          childVal = val[k];
-        } catch {
-          continue;
-        }
-        if (!childVal || typeof childVal !== 'object') continue;
-
-        let subProjId = nextProjId;
-        let subProjName = nextProjName;
-        if (outProjects.byId.has(k)) {
-          subProjId = k;
-          subProjName = outProjects.byId.get(k).name;
-        } else {
-          const lowK = extractBasenameFromUri(k).toLowerCase();
-          if (knownLowerNames.has(lowK)) {
-            subProjName = lowerToCanonical?.get(lowK) || k;
+          if (looksLikeConversationObject(val, fallbackConvId)) {
+            const conv = extractConvRecord(
+              val,
+              nextProjId,
+              nextProjName,
+              fallbackConvId,
+              knownLowerNames,
+              lowerToCanonical
+            );
+            const key = getConvMergeKey(conv);
+            const prev = outConvs.get(key);
+            outConvs.set(key, mergeConvRecord(prev, conv));
+            return;
           }
+        } catch {}
+
+        // 遍历普通对象键值
+        const keys = Object.keys(val);
+        for (let i = 0; i < keys.length && i < 65; i++) {
+          const k = keys[i];
+          if (
+            k.startsWith('_') ||
+            k === 'children' ||
+            k === 'stateNode' ||
+            k === 'return' ||
+            k === 'sibling' ||
+            k === 'child'
+          ) {
+            continue;
+          }
+          let childVal;
+          try {
+            childVal = val[k];
+          } catch {
+            continue;
+          }
+          if (!childVal || typeof childVal !== 'object') continue;
+
+          let subProjId = nextProjId;
+          let subProjName = nextProjName;
+          if (outProjects.byId.has(k)) {
+            subProjId = k;
+            subProjName = outProjects.byId.get(k).name;
+          } else {
+            const lowK = extractBasenameFromUri(k).toLowerCase();
+            if (knownLowerNames.has(lowK)) {
+              subProjName = lowerToCanonical?.get(lowK) || k;
+            }
+          }
+          walk(childVal, depth + 1, subProjId, subProjName, k);
         }
-        walk(childVal, depth + 1, subProjId, subProjName, k);
+      } catch {
+        return;
       }
     }
 
@@ -1057,6 +1166,9 @@
       }
       netDataDirty = true;
     }
+    pruneMapToLimit(netProjectsById);
+    pruneMapToLimit(netProjectsByName);
+    pruneMapToLimit(netConvsById);
   }
 
   // ============================================================================
@@ -1271,32 +1383,38 @@
     const sharedFibersVisited = new WeakSet();
 
     const scanSingleFiberData = (fiber, contextProjId, contextProjName) => {
-      const props = fiber.memoizedProps;
-      if (props && typeof props === 'object') {
-        inspectCandidateContainers(props, knownLowerNames, lowerToCanonical, outProjects, outConvs);
-        scanArbitraryDataTree(
-          props,
-          knownLowerNames,
-          lowerToCanonical,
-          outProjects,
-          outConvs,
-          contextProjId,
-          contextProjName
-        );
-      }
+      try {
+        const props = fiber.memoizedProps;
+        if (props && typeof props === 'object') {
+          inspectCandidateContainers(props, knownLowerNames, lowerToCanonical, outProjects, outConvs);
+          scanArbitraryDataTree(
+            props,
+            knownLowerNames,
+            lowerToCanonical,
+            outProjects,
+            outConvs,
+            contextProjId,
+            contextProjName
+          );
+        }
+      } catch {}
 
-      for (const val of collectFiberHooksAndContexts(fiber)) {
-        inspectCandidateContainers(val, knownLowerNames, lowerToCanonical, outProjects, outConvs);
-        scanArbitraryDataTree(
-          val,
-          knownLowerNames,
-          lowerToCanonical,
-          outProjects,
-          outConvs,
-          contextProjId,
-          contextProjName
-        );
-      }
+      try {
+        for (const val of collectFiberHooksAndContexts(fiber)) {
+          try {
+            inspectCandidateContainers(val, knownLowerNames, lowerToCanonical, outProjects, outConvs);
+            scanArbitraryDataTree(
+              val,
+              knownLowerNames,
+              lowerToCanonical,
+              outProjects,
+              outConvs,
+              contextProjId,
+              contextProjName
+            );
+          } catch {}
+        }
+      } catch {}
     };
 
     let firstRoot = null;
@@ -1381,6 +1499,9 @@
       netConvsById.set(k, merged);
       outConvs.set(k, merged);
     }
+    pruneMapToLimit(netProjectsById);
+    pruneMapToLimit(netProjectsByName);
+    pruneMapToLimit(netConvsById);
     for (const [k, netRec] of netConvsById.entries()) {
       if (!outConvs.has(k)) {
         outConvs.set(k, { ...netRec });
@@ -1410,6 +1531,8 @@
           state: conv.state,
           isDetailRecord: Boolean(conv.isDetailRecord),
           isTerminal: Boolean(conv.isTerminal),
+          stepsCount: conv.stepsCount ?? null,
+          waitingSteps: conv.waitingSteps ?? null,
           debugFields: conv.debugFields || {}
         });
       }

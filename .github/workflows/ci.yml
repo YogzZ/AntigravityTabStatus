@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    name: Verify & Package Extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run extension verification suite
+        run: node scripts/verify.mjs
+
+      - name: Build clean runtime package
+        run: bash scripts/package.sh
+
+      - name: Inspect package contents
+        run: unzip -l dist/antigravity-tab-status-v*.zip
+
+      - name: Upload packaged zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-tab-status-extension
+          path: dist/antigravity-tab-status-v*.zip
+          if-no-files-found: error
+          retention-days: 14

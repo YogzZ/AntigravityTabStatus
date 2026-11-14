@@ -1,8 +1,8 @@
 /**
- * Antigravity Tab Status - Unified Sidebar Projects & Active Pane Scanner (v2.6.0)
+ * Antigravity Tab Status - Unified Sidebar Projects & Active Pane Scanner (v2.7.0)
  *
  * 针对真实 Antigravity 工作区侧边栏结构与「折叠项目」深度校准：
- * - 严格限定采集左侧 `Projects` 下方至 `Settings` / `grchain` 上方的当前实例项目
+ * - 严格限定采集左侧 `Projects` 下方至 `Settings` / 实例切换器上方的当前实例项目
  * - 三重机制突破「项目折叠后读不到对话」限制：
  *   1) 通过 `page-bridge.js` (`world: "MAIN"`) 从 React Fiber / QueryCache / 网络流直接提取已折叠项目的对话与实时状态
  *   2) 展开态记忆缓存：用户展开过再折叠时完整保留对话列表与已知状态
@@ -11,8 +11,8 @@
 
 (() => {
   const isTop = window.top === window.self;
-  const AGY_HOST_RE = /^([a-z0-9-]+\.)?antigravity\.google(\.com)?$/i;
-  const AGY_ORIGIN_RE = /^https:\/\/([a-z0-9-]+\.)?antigravity\.google(\.com)?$/i;
+  const AGY_HOST_RE = /^(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
 
   if (isTop) {
     if (!AGY_HOST_RE.test(window.location.hostname || '')) return;
@@ -446,7 +446,7 @@
   // ============================================================================
 
   /**
-   * 提取右侧主对话区顶部面包屑（如 `rust / Next Step Planning And Mode Suggestion`），
+   * 提取右侧主对话区顶部面包屑（如 `project-name / Conversation Title`），
    * 用于在无 aria-current 时精准定位侧边栏中哪一条对话处于「当前打开」状态。
    */
   function detectMainPaneBreadcrumb() {
@@ -992,7 +992,7 @@
   }
 
   /**
-   * 过滤底部实例切换器（如 `[ 🟢 grchain ⌄ ]`）或底部导航栏条目
+   * 过滤底部实例切换器（如 `[ 🟢 workspace-instance ⌄ ]`）或底部导航栏条目
    */
   function isInstanceSwitcherOrFooterRow(rowEl, scope) {
     const r = rowEl.getBoundingClientRect();
@@ -1431,7 +1431,7 @@
   }
 
   /**
-   * 在侧边栏容器内查找底部 `Settings` / `设置` 行上边界，严格截断其下方的实例选择器（如 grchain）
+   * 在侧边栏容器内查找底部 `Settings` / `设置` 行上边界，严格截断其下方的实例选择器（如底部工作区切换器）
    */
   function findSettingsCutoffY(container, minTopY, maxSidebarRight) {
     let cutoffY = Infinity;
@@ -1680,8 +1680,14 @@
       }
 
       const nextRawTitle = extracted[i + 1]?.title || '';
-      const headerInfo = detectProjectHeaderInfo(item, scope, nextRawTitle);
-      const signal = inspectRowSignals(item.el, item.mainTitleEl, headerInfo.iconEl || null);
+      let headerInfo = { isProject: false, projectType: 'local' };
+      try {
+        headerInfo = detectProjectHeaderInfo(item, scope, nextRawTitle);
+      } catch {}
+      let signal = { state: 'idle', reason: '' };
+      try {
+        signal = inspectRowSignals(item.el, item.mainTitleEl, headerInfo.iconEl || null);
+      } catch {}
       const isActiveExplicit = !headerInfo.isProject && isRowCurrentlySelected(item.el);
       const hasBorderBox = !headerInfo.isProject && hasNonHoverSelectionBorder(item.el);
       const linkEl = item.el.tagName === 'A' ? item.el : item.el.querySelector('a[href]');
@@ -1873,7 +1879,7 @@
                 domTask.state = 'waiting';
                 domTask.reason = resolveBridgeReason(matched) || domTask.reason;
               } else if (matched.state === 'running' && domTask.state === 'idle' && !domTask.timeText) {
-                if (!matched.confirmedDetail && domTask.hasStaticRightStatusIcon) {
+                if (domTask.hasStaticRightStatusIcon) {
                   // 冷启动关联：行本身未展示运行动画却有右侧静态状态图标（如 ?/审阅图标），且摘要仅返回活跃 running
                   domTask.state = 'waiting';
                   domTask.reason = t('reasonSidebarWaitingIcon', {}, 'Waiting indicator in sidebar');
@@ -1918,7 +1924,7 @@
               if (activePaneResult.state === 'waiting') {
                 st = 'waiting';
                 rsn = activePaneResult.reason;
-              } else if (activePaneResult.state === 'running' && st !== 'waiting') {
+              } else if (activePaneResult.state === 'running') {
                 st = 'running';
                 rsn = activePaneResult.reason;
               } else if (st === 'unread') {
@@ -1966,7 +1972,7 @@
                 if (activePaneResult.state === 'waiting') {
                   st = 'waiting';
                   rsn = activePaneResult.reason;
-                } else if (activePaneResult.state === 'running' && st !== 'waiting') {
+                } else if (activePaneResult.state === 'running') {
                   st = 'running';
                   rsn = activePaneResult.reason;
                 }

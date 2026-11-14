@@ -1,13 +1,23 @@
 [English](./README.md) | **简体中文**
 
-# Antigravity Tab Status (`v2.7.0`)
+# Antigravity Tab Status (`v2.8.0`)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Manifest V3](https://img.shields.io/badge/Manifest-V3-34a853.svg)](./manifest.json)
+[![Chromium 120+](https://img.shields.io/badge/Chromium-120%2B-4285f4.svg)](./AGENTS.md)
+[![Locales: 10](https://img.shields.io/badge/Locales-10-8ab4f8.svg)](./_locales)
+[![CI](https://github.com/YogzZ/AntigravityTabStatus/actions/workflows/ci.yml/badge.svg)](https://github.com/YogzZ/AntigravityTabStatus/actions/workflows/ci.yml)
 
 一款轻量、隐私优先的 **Manifest V3** 浏览器扩展（支持 Chrome / Edge / Arc / Brave），实时同步 [Google Antigravity](https://antigravity.google.com/) 当前实例下所有项目（包括已折叠项目）及对话状态，并以**纯净的标签页图标状态灯**直观提醒，不再向标签页标题追加任何文字。
 
 ---
 
-## 核心特性 (`v2.7.0`)
+## 核心特性 (`v2.8.0`)
 
+- **跨网页全局面板 & 常驻 Chrome Side Panel**
+  - **任意网页随时看：** 浏览任何网页时，浏览器工具栏都会实时显示汇总的 `待处理 + 未读` 全局角标；点击扩展图标即可直接查看后台 Antigravity 实例、项目与对话进度，无需再切换标签页反复确认。
+  - **随时打开常驻侧边栏（`sidepanel.html`）：** 点击弹窗顶栏右侧按钮即可一键将状态面板固定在浏览器右侧边栏；也支持在设置中将工具栏点击默认行为切换为 **「侧边栏」**。
+  - **多实例聚合 & 一键直达：** 同时开启多个 Antigravity 标签页时支持在 `全部 (N)` 聚合视图与单实例间自由切换；点击任意项目或对话即可自动激活对应浏览器标签页与窗口并定位过去。
 - **纯净标签页状态灯（零标题文字干扰）**
   - 彻底告别冗长的标题后缀——不再向 `document.title` 追加「待处理 / 未读 / 运行中」等文字，并自动清理旧版本遗留的标题后缀，保持标签页标题干净整洁。
   - 严格遵循全局状态优先级：
@@ -38,19 +48,31 @@
   - [`page-bridge.js`](./page-bridge.js) 运行于 MV3 原生 `world: "MAIN"`，内置 **500ms 短时缓存**，直接读取 React 18/19 Fiber、TanStack QueryCache、Zustand/Redux Store 与只读网络流中的折叠项目与对话状态（缓存命中耗时 `< 0.1ms`，零侧边栏闪烁）。
   - 在弹窗点击任意对话（包括已折叠项目下的对话），自动展开对应项目并精准跳转。
 - **零 CSP 报错 · 隐私优先**
-  - **无 Blob Worker**、无 `eval()`、无任何远程统计或数据上传。
+  - **无 Blob Worker**、无 `eval()`、无任何远程统计或数据上传（详见 [隐私政策](./PRIVACY.md)）。
   - 后台计时器与 `OffscreenCanvas` 图标解码全部在扩展 Service Worker（[`background.js`](./background.js)）中安全执行。
-  - 仅申请 `storage` 权限及限定于 Antigravity 域名与 `gstatic.com` 图标的主机权限。
+  - 仅申请 `storage` 与 `sidePanel` 权限（不请求 `tabs` 或 `<all_urls>`），`content_scripts` 与 `host_permissions` 均严格限定在 Antigravity 域名（`antigravity.google` / `antigravity.google.com`）、内嵌 Antigravity 工作区 iframe 域名（`*.usercontent.goog`，通过 `location.ancestorOrigins` 严格校验顶层来源）与 `gstatic.com` 图标范围内。
 
 ---
 
-## 安装 / 升级步骤（加载已解压扩展）
+## 安装 / 升级步骤
 
-1. 下载或克隆本仓库（版本升级时直接解压覆盖原文件夹即可）。
+### 方式一：下载 Release 预构建压缩包（推荐）
+
+1. 前往 [GitHub Releases](https://github.com/YogzZ/AntigravityTabStatus/releases) 下载最新 `antigravity-tab-status-v*.zip` 并解压到固定目录（升级时直接解压覆盖原文件夹即可）。
 2. 打开 `chrome://extensions/`（Chrome / Arc / Brave）或 `edge://extensions/`（Microsoft Edge），确保开启右上角 **「开发者模式」**。
-3. **首次安装：** 点击 **「加载已解压的扩展程序」**，选择包含 `manifest.json` 的项目目录。
+3. **首次安装：** 点击 **「加载已解压的扩展程序」**，选择包含 `manifest.json` 的解压目录。
    **版本升级：** 点击 **Antigravity Tab Status** 卡片上的 **「刷新 ↻」** 按钮（如有旧版本历史提示，建议进入「错误」页签点击「全部清除」）。
 4. **刷新一次已打开的 `https://antigravity.google.com/` 标签页** 即可立即生效。
+
+### 方式二：从源码校验并本地打包
+
+1. 克隆本仓库（`git clone https://github.com/YogzZ/AntigravityTabStatus.git`）。
+2. *（可选）* 运行一键校验并生成纯净发布包（输出到 `dist/antigravity-tab-status-v2.8.0.zip`）：
+   ```bash
+   node scripts/verify.mjs
+   bash scripts/package.sh
+   ```
+3. 在 `chrome://extensions/` 中加载仓库目录或解压后的 `dist/` 包目录即可。
 
 > **浏览器要求：** Chromium 120+（需支持 MV3 `world: "MAIN"`、`OffscreenCanvas`、CSS `light-dark()`、`@layer` 与 `details::details-content`）。
 
@@ -69,8 +91,8 @@ Antigravity 页面与子框架 (ISOLATED 世界)
                                     ▼                                  └─ 扩展角标与跨框架消息转发
                         64x64 Canvas 标签页状态灯
                                     ▲
-                                    │ (chrome.storage.sync + 运行时消息)
-                      popup.html / popup.css / popup.js
+                                    │ (chrome.storage.sync/session + 跨标签页运行时消息)
+                      popup.html / sidepanel.html / popup.css / popup.js
 ```
 
 ---
@@ -79,19 +101,40 @@ Antigravity 页面与子框架 (ISOLATED 世界)
 
 | 文件 / 目录 | 说明 |
 | :--- | :--- |
-| `manifest.json` | Manifest V3 配置（`v2.7.0`）、`default_locale: "en"`、受限 `host_permissions`、`MAIN` 与 `ISOLATED` 脚本声明 |
-| `background.js` | MV3 Service Worker：`agy-timer` Port 计时器、`OffscreenCanvas` 图标像素解码、扩展图标数字角标及跨框架消息转发 |
+| `manifest.json` | Manifest V3 配置（`v2.8.0`）、`default_locale: "en"`、`storage` + `sidePanel` 权限、受限 `host_permissions`、`MAIN` 与 `ISOLATED` 脚本声明 |
+| `background.js` | MV3 Service Worker：`agy-timer` Port 计时器、`OffscreenCanvas` 图标像素解码、`storage.session` 全局数字角标汇总、`actionClickMode` 同步及跨框架消息转发 |
 | `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber、状态存储及被动只读网络流桥接器（内置 500ms 缓存） |
 | `i18n.js` | 浏览器语言自动识别与 10 语言词典（`window.__AGY_I18N__`），服务于弹窗与状态扫描文案 |
 | `scanner.js` | 统一工作区扫描器，融合 DOM、内存桥接快照与已折叠项目缓存 |
 | `content.js` | 顶层全局状态优先级引擎、64x64 Canvas 渲染器（6 种风格 × 2 种挂载模式）、旧标题后缀清理与 Port 动画驱动 |
 | `frame-detector.js` | 子工作区 iframe 扫描与顶层状态同步上报脚本 |
-| `popup.html` / `popup.css` / `popup.js` | 支持浅色/深色与无障碍的扩展弹窗界面，提供项目与对话列表、6 种风格 2×3 选择器、预览模式与选择器诊断 |
+| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | 适配浅色/深色与无障碍的双形态面板 UI（快捷弹窗 + `100dvh` 响应式侧边栏），提供跨网页实例切换、项目对话一键直达、6 风格 2×3 选择器、点击模式设置、预览与选择器诊断 |
 | `_locales/` | Chrome 扩展多语言元数据目录（`en`、`zh_CN`、`zh_TW`、`ja`、`ko`、`es`、`fr`、`de`、`pt_BR`、`ru`） |
 | `icons/` | 扩展图标资源（`16x16`、`32x32`、`48x48`、`128x128`） |
-| `AGENTS.md` | 开发者与 AI Agent 协作规范、浏览器支持策略、CSP/MV3 约束及本地校验命令 |
+| `AGENTS.md` | 开发者与 AI Agent 协作规范、浏览器支持策略、CSP/MV3 约束及校验打包命令 |
 | `PLAN.md` | v2.6.0–v2.7.0 架构拆解与开源演进路线图 |
-| `.gitignore` | Git 忽略规则（系统缓存、打包产物、依赖及编辑器配置） |
+| `CHANGELOG.md` | 遵循 Keep a Changelog 规范的版本更新日志 |
+| `PRIVACY.md` | 隐私政策及本地存储 / 权限使用说明 |
+| `CHROMEWEBSTORE.md` | Chrome / Edge 扩展商店上架文案、权限说明及提审清单 |
+| `LICENSE` | MIT 开源许可证 |
+| `scripts/verify.mjs` | 零第三方依赖 Node 校验脚本（语法、MV3 权限范围、10 语言 129 键、CSP/安全、PNG 完整性与敏感信息扫描） |
+| `scripts/package.sh` | 自动运行校验并在 `dist/` 生成仅含运行时文件的纯净发布 `.zip` 包 |
+| `.github/workflows/ci.yml` | GitHub Actions 自动校验与构建工作流 |
+| `.gitignore` | Git 忽略规则（系统缓存、构建目录 `dist/`、`*.zip` / `*.crx` / `*.pem`、依赖及编辑器配置） |
+
+---
+
+## 校验与构建发布包
+
+仅需 **Node.js 20+**，无需安装任何 `npm` 依赖：
+
+```bash
+# 运行脚本语法、manifest 权限范围、10 语言 i18n、CSP/安全、PNG 图标及敏感信息扫描
+node scripts/verify.mjs
+
+# 执行全量校验并构建纯净发布包 dist/antigravity-tab-status-v2.8.0.zip
+bash scripts/package.sh
+```
 
 ---
 
@@ -99,6 +142,14 @@ Antigravity 页面与子框架 (ISOLATED 世界)
 
 欢迎提交 Issue 与 Pull Request！在改动代码前请先了解：
 
-1. 阅读 [AGENTS.md](./AGENTS.md)，遵循 **浏览器支持策略（Chromium 120+）**、MV3 / CSP 安全规范、10 语言键名一致性要求及本地校验命令。
-2. 查看 [PLAN.md](./PLAN.md) 了解后续里程碑规划（`M2` 自动化测试与 CI、`M3` Chrome / Edge 商店上架准备、`M4` 社区体验增强）。
-3. 提交修改前，请务必运行脚本语法检查、`_locales` JSON 校验以及 10 语言 key 完整性校验。
+1. 阅读 [AGENTS.md](./AGENTS.md)，遵循 **浏览器支持策略（Chromium 120+）**、MV3 / CSP 安全规范、10 语言键名一致性要求及校验打包命令。
+2. 查看 [PLAN.md](./PLAN.md) 了解后续里程碑规划（`M3` Chrome / Edge 商店上架准备、`M4` 社区体验增强）。
+3. 提交修改前，请务必运行 `node scripts/verify.mjs` 确认所有检查通过。
+
+---
+
+## 开源许可与免责声明
+
+- 本项目基于 [MIT License](./LICENSE) 开源。
+- 隐私与权限承诺详见 [PRIVACY.md](./PRIVACY.md)。
+- **免责声明：** **Antigravity Tab Status** 为独立的社区开源扩展项目，与 Google LLC 无任何官方关联、授权或赞助关系。"Google"、"Antigravity" 与 "Gemini" 为 Google LLC 的注册商标。

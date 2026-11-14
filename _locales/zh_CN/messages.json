@@ -3,7 +3,7 @@
     "message": "Antigravity Tab Status"
   },
   "extDescription": {
-    "message": "纯净标签页动态状态灯：支持 Antigravity 原生、Gemini 原生、呼吸灯、Claude、极客终端、Emoji 6 种风格，实时同步并支持 10 种语言。"
+    "message": "Antigravity 跨网页全局监控与侧边栏：随时在任意页面查看项目进度、一键跳转对话，支持 6 种状态灯与 10 种语言。"
   },
   "actionTitle": {
     "message": "Antigravity 项目状态灯"

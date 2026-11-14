@@ -1,6 +1,6 @@
 # AGENTS.md — Contributor & AI Agent Guide
 
-Repository guidance for AI coding agents and open-source contributors working on **Antigravity Tab Status** (`v2.7.0`).
+Repository guidance for AI coding agents and open-source contributors working on **Antigravity Tab Status** (`v2.8.0`).
 
 ---
 
@@ -8,7 +8,7 @@ Repository guidance for AI coding agents and open-source contributors working on
 
 Before modifying any project file, consult the relevant local guidance:
 
-1. **Web UI, HTML, CSS, and Client-Side JS (`popup.html`, `popup.css`, `popup.js`, `content.js` Canvas/DOM)**
+1. **Web UI, HTML, CSS, and Client-Side JS (`popup.html`, `sidepanel.html`, `popup.css`, `popup.js`, `content.js` Canvas/DOM)**
    - Consult **`modern-web-guidance`** (`SKILL.md` + relevant topic guides under `guides/html/`, `guides/css/`, `guides/accessibility/`, `guides/visual-design/`, `guides/ui-behaviors/`, `guides/performance/`, `guides/security/`).
    - Never rely on legacy CSS/DOM habits when modern Baseline features are specified by the project's Browser Support Policy.
 2. **Browser Extension Architecture (`manifest.json`, `background.js`, content scripts, messaging, permissions)**
@@ -23,6 +23,7 @@ Before modifying any project file, consult the relevant local guidance:
 
 - **Baseline & Modern Web Features Used:**
   - MV3 `content_scripts` with `world: "MAIN"` (`page-bridge.js`) and `world: "ISOLATED"` (`i18n.js`, `scanner.js`, `content.js`, `frame-detector.js`)
+  - Chrome `Side Panel` API (`sidepanel.html`) + CSS container queries (`container: panel / inline-size`), `100dvh`, and `container-type: scroll-state` where supported
   - `OffscreenCanvas` + `createImageBitmap` in the Service Worker (`background.js`)
   - CSS `@layer` cascade ordering (`reset, tokens, base, components, utilities`)
   - `color-scheme: light dark`, `light-dark()`, `color-mix(in oklab, ...)`
@@ -39,7 +40,7 @@ Before modifying any project file, consult the relevant local guidance:
 
 Google Antigravity enforces strict Content Security Policy rules (`script-src 'self'`, `worker-src 'self'`, `img-src 'self'`), and Chrome Extension pages enforce strict MV3 CSP:
 
-- **Zero Inline Code:** No inline `<script>`, no inline `<style>`, and no inline HTML event handlers (`onclick=`, `onload=`, etc.) in `popup.html`. Always bind events with `addEventListener`.
+- **Zero Inline Code:** No inline `<script>`, no inline `<style>`, and no inline HTML event handlers (`onclick=`, `onload=`, etc.) in `popup.html` or `sidepanel.html`. Always bind events with `addEventListener`.
 - **Zero Dynamic Code Execution:** Never use `eval()`, `new Function()`, or string-based `setTimeout`/`setInterval`.
 - **Zero Blob Workers:** Never create `new Worker(URL.createObjectURL(...))` inside content scripts or pages. Background timers and animation ticks MUST run through the `chrome.runtime.connect({ name: 'agy-timer' })` Port managed by `background.js`.
 - **Async/Await Convention:** Prefer `async`/`await` over `.then()` chains across extension scripts.
@@ -47,8 +48,8 @@ Google Antigravity enforces strict Content Security Policy rules (`script-src 's
   - Always handle or consume `chrome.runtime.lastError` in callback-based Chrome APIs and guard against invalidated extension contexts (`chrome.runtime?.id`) after extension reloads.
 - **Ephemeral Service Worker:** `background.js` can be terminated after ~30s of inactivity. Never persist user settings or durable app state in Service Worker globals; use `chrome.storage.sync` (settings) or `chrome.storage.local` / `chrome.storage.session` when needed.
 - **Minimal Permissions:**
-  - `permissions`: `["storage"]` only (do NOT add `tabs`, `<all_urls>` permissions, or analytics).
-  - `host_permissions`: Scoped strictly to Antigravity origins (`https://antigravity.google.com/*`, `https://*.antigravity.google.com/*`, `https://antigravity.google/*`, `https://*.antigravity.google/*`) and `https://*.gstatic.com/*` (for favicon decoding in `background.js`).
+  - `permissions`: `["storage", "sidePanel"]` only (do NOT add `tabs`, `<all_urls>` permissions, or analytics).
+  - `host_permissions`: Scoped strictly to Antigravity origins (`https://antigravity.google.com/*`, `https://*.antigravity.google.com/*`, `https://antigravity.google/*`, `https://*.antigravity.google/*`), isolated Antigravity workspace iframe hosts (`https://*.usercontent.goog/*`, guarded by `location.ancestorOrigins` verification in every `all_frames: true` script), and `https://*.gstatic.com/*` (for favicon decoding in `background.js`).
 - **Read-Only Memory/Network Observation:** `page-bridge.js` must passively observe and clone data only — never mutate or intercept/block host `fetch`, `XHR`, or `WebSocket` payloads.
 
 ---
@@ -59,13 +60,13 @@ Google Antigravity enforces strict Content Security Policy rules (`script-src 's
 
 | Context / World | Files | Load Timing | Responsibilities |
 | :--- | :--- | :--- | :--- |
-| **MAIN World** | `page-bridge.js` | `document_start`, `all_frames: true` | Traverses React 18/19 Fiber (`HostRoot`, `Context.Provider`, `dependencies.firstContext`), TanStack `QueryClient`, Redux/Zustand stores, and passively observes `fetch`/`XHR`/`WebSocket` streams with a `500ms` result cache. Outputs structured `{ reasonCode, reasonVars, reason }` without depending on `window.__AGY_I18N__`. |
-| **ISOLATED World (Top Frame)** | `i18n.js` -> `scanner.js` -> `content.js` | `document_idle`, `all_frames: false` | Aggregates top-frame + child-iframe workspace states, resolves global priority, runs completion debounce (`1500ms`), translates `reasonCode` via `window.__AGY_I18N__`, renders the 64x64 Canvas status light favicon, updates `chrome.action` badge count, and strips any legacy title suffixes. |
-| **ISOLATED World (Child Frames)** | `i18n.js` -> `scanner.js` -> `frame-detector.js` | `document_idle`, `all_frames: true` | Scans workspace iframes (`window.top !== window.self`) and relays snapshots to the top frame via `window.top.postMessage` and `CHILD_FRAME_SYNC` through `background.js`. |
-| **Extension Service Worker** | `background.js` | Event-driven | Hosts `agy-timer` Port (`START_INTERVAL`, `STOP_INTERVAL`, `SET_TIMEOUT`, `CLEAR_TIMEOUT`), decodes favicons into 64x64 RGBA pixels via `OffscreenCanvas` (`FETCH_FAVICON_PIXELS`), updates toolbar badge (`UPDATE_ACTION_BADGE`), and relays child-frame sync & task focus broadcasts (`FOCUS_TASK_BROADCAST`, `PROBE_COLLAPSED_BROADCAST`). |
-| **Extension Popup** | `popup.html`, `popup.css`, `i18n.js`, `popup.js` | On action click | Displays live instance summary, per-project & per-conversation list with one-click jump, mark-all-read action, and settings for light style, mount layout, badge size, preview mode, and custom selectors. |
+| **MAIN World** | `page-bridge.js` | `document_start`, `all_frames: true` (`antigravity.google(.com)` + `*.usercontent.goog` workspace iframes with `ancestorOrigins` guard + `match_about_blank`/`match_origin_as_fallback`) | Traverses React 18/19 Fiber (`HostRoot`, `Context.Provider`, `dependencies.firstContext`), TanStack `QueryClient`, Redux/Zustand stores, and passively observes `fetch`/`XHR`/`WebSocket` streams with a `500ms` result cache (and FIFO cap at `1000` entries). Outputs structured `{ reasonCode, reasonVars, reason }` without depending on `window.__AGY_I18N__`. |
+| **ISOLATED World (Top Frame)** | `i18n.js` -> `scanner.js` -> `content.js` | `document_idle`, `all_frames: false` (`antigravity.google(.com)` origins) | Aggregates top-frame + child-iframe workspace states, resolves global priority, runs completion debounce (`1500ms`), translates `reasonCode` via `window.__AGY_I18N__`, renders the 64x64 Canvas status light favicon, updates `chrome.action` badge count, strips any legacy title suffixes, and validates origins on child-frame `postMessage` traffic (permitting only `antigravity.google(.com)` and mounted `*.usercontent.goog` workspace iframes). |
+| **ISOLATED World (Child Frames)** | `i18n.js` -> `scanner.js` -> `frame-detector.js` | `document_idle`, `all_frames: true` (`antigravity.google(.com)` + `*.usercontent.goog` workspace iframes with `ancestorOrigins` guard + `match_about_blank`/`match_origin_as_fallback`) | Scans workspace iframes (`window.top !== window.self`) and relays snapshots to the top frame via origin-verified `window.top.postMessage` and `CHILD_FRAME_SYNC` through `background.js`. |
+| **Extension Service Worker** | `background.js` | Event-driven | Hosts `agy-timer` Port (`START_INTERVAL`, `STOP_INTERVAL`, `SET_TIMEOUT`, `CLEAR_TIMEOUT`), decodes favicons into 64x64 RGBA pixels via `OffscreenCanvas` (`FETCH_FAVICON_PIXELS`), aggregates global toolbar badges via `chrome.storage.session`, synchronizes `actionClickMode` (`setPanelBehavior` + `setPopup`), and relays child-frame sync & task focus broadcasts (`FOCUS_TASK_BROADCAST`, `PROBE_COLLAPSED_BROADCAST`). |
+| **Extension Popup & Side Panel** | `popup.html`, `sidepanel.html`, `popup.css`, `i18n.js`, `popup.js` | On action click / Side Panel open | Discovers live Antigravity tabs across all browser windows (even when browsing unrelated websites), aggregates single or multi-instance project/conversation trees with one-click cross-tab activation, provides Side Panel launch & `actionClickMode` controls, mark-all-read, light style picker, mount layout, preview mode, and custom selectors. |
 
-> **Script Ordering Rule:** In both `ISOLATED` `content_scripts` entries in `manifest.json` AND in `popup.html`, `i18n.js` MUST load **before** `scanner.js`, `content.js`, `frame-detector.js`, and `popup.js`.
+> **Script Ordering Rule:** In both `ISOLATED` `content_scripts` entries in `manifest.json` AND in `popup.html` / `sidepanel.html`, `i18n.js` MUST load **before** `scanner.js`, `content.js`, `frame-detector.js`, and `popup.js`.
 
 ### 4.2 Global Status Priority & v2.7 Indicator-Only Tab Light Philosophy
 
@@ -92,6 +93,7 @@ Global tab state strictly follows:
     indicatorStyle: 'glow',   // 'antigravity' | 'gemini' | 'glow' | 'claude' | 'geek' | 'emoji'
     iconLayout: 'standalone', // 'standalone' | 'badge'
     badgeSize: 'standard',    // 'standard' | 'large'
+    actionClickMode: 'popup', // 'popup' | 'sidepanel'
     autoProbeCollapsed: false,
     customWaitingSelector: '',
     customRunningSelector: ''
@@ -108,67 +110,23 @@ Supported locales (`10`): `en`, `zh_CN`, `zh_TW`, `ja`, `ko`, `es`, `fr`, `de`, 
 2. **Manifest Locale Strings:** Every `_locales/<locale>/messages.json` MUST define `extName`, `extDescription`, and `actionTitle` matching `manifest.json` (`__MSG_extName__`, `__MSG_extDescription__`, `__MSG_actionTitle__`), with `default_locale: "en"`.
 3. **100% Key Parity in `i18n.js`:**
    - Every locale dictionary inside `window.__AGY_I18N__` (`i18n.js`) MUST contain the exact same non-empty key set.
-   - Every `[data-i18n]`, `[data-i18n-title]`, `[data-i18n-placeholder]`, and `[data-i18n-aria-label]` attribute in `popup.html`, every `t('...')` call in `popup.js`, `content.js`, and `scanner.js`, and every `reasonCode` emitted by `page-bridge.js` MUST exist in all 10 locales.
-   - Placeholder tokens (`{count}`, `{sample}`, `{projects}`, `{tasks}`, `{frames}`, `{time}`, `{text}`, `{project}`, `{state}`) must match across all translations of a key.
+   - Every `[data-i18n]`, `[data-i18n-title]`, `[data-i18n-placeholder]`, and `[data-i18n-aria-label]` attribute in `popup.html` and `sidepanel.html`, every `t('...')` call in `popup.js`, `content.js`, and `scanner.js`, and every `reasonCode` emitted by `page-bridge.js` MUST exist in all 10 locales.
+   - Placeholder tokens (`{count}`, `{name}`, `{sample}`, `{projects}`, `{tasks}`, `{frames}`, `{time}`, `{text}`, `{project}`, `{state}`) must match across all translations of a key.
 4. **Preserve Bilingual DOM Scraping Regexes:** Do **not** localize or remove English/Chinese UI-scraping patterns in `scanner.js` (e.g., `RELATIVE_TIME_RE`, `NAV_CHROME_TEXT_RE`, `EMPTY_PLACEHOLDER_RE`, `DESTRUCTIVE_BTN_RE`). Host Antigravity DOM detection must keep working regardless of browser UI language.
 
 ---
 
-## 6. Local Verification Commands
+## 6. Local Verification & Packaging Commands
 
-Run these checks from the repository root (`/home/jake/web_status_agy`) before submitting any change (replace `node` with `/home/jake/.nvm/versions/node/v24.21.0/bin/node` if `node` is not on `PATH`):
+Run these checks from the repository root before submitting any pull request or release build (requires Node.js 20+):
 
 ```bash
-# 1. JavaScript syntax check across all extension scripts
-for f in background.js i18n.js page-bridge.js scanner.js content.js frame-detector.js popup.js; do
-  node --check "$f"
-done
+# 1. Full automated verification suite (syntax, MV3 & permission scope, 10-locale parity, CSP/security, PNG icons, leak checks)
+node scripts/verify.mjs
 
-# 2. Validate manifest.json and all 10 _locales/*/messages.json files
-node -e '
-const fs = require("fs");
-const locales = ["en","zh_CN","zh_TW","ja","ko","es","fr","de","pt_BR","ru"];
-const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
-console.log("manifest version:", manifest.version, "default_locale:", manifest.default_locale);
-for (const loc of locales) {
-  const msg = JSON.parse(fs.readFileSync(`_locales/${loc}/messages.json`, "utf8"));
-  for (const k of ["extName", "extDescription", "actionTitle"]) {
-    if (!msg[k]?.message?.trim()) throw new Error(`Missing ${k} in _locales/${loc}/messages.json`);
-  }
-}
-console.log("All 10 _locales messages.json valid.");
-'
-
-# 3. Verify i18n.js key parity and HTML/JS key coverage (expected: 118 keys across 10 locales)
-node -e '
-const fs = require("fs");
-const vm = require("vm");
-const locales = ["en","zh_CN","zh_TW","ja","ko","es","fr","de","pt_BR","ru"];
-const keys = new Set();
-const html = fs.readFileSync("popup.html", "utf8");
-for (const m of html.matchAll(/data-i18n(?:-title|-placeholder|-aria-label)?="([^"]+)"/g)) keys.add(m[1]);
-for (const file of ["popup.js", "content.js", "scanner.js"]) {
-  const code = fs.readFileSync(file, "utf8");
-  for (const m of code.matchAll(/\bt\(\s*[\x27"]([a-zA-Z0-9_]+)[\x27"]/g)) keys.add(m[1]);
-}
-const bridge = fs.readFileSync("page-bridge.js", "utf8");
-for (const m of bridge.matchAll(/reasonCode:\s*[\x27"]([a-zA-Z0-9_]+)[\x27"]/g)) keys.add(m[1]);
-const src = fs.readFileSync("i18n.js", "utf8");
-for (const loc of locales) {
-  const sandbox = {
-    window: {},
-    navigator: { language: loc.replace("_", "-"), languages: [loc.replace("_", "-")] },
-    chrome: { i18n: { getUILanguage: () => loc.replace("_", "-") } },
-    document: { documentElement: { lang: "" }, querySelectorAll: () => [] }
-  };
-  vm.runInNewContext(src, sandbox);
-  const i18n = sandbox.window.__AGY_I18N__;
-  if (!i18n || i18n.getLocale() !== loc) throw new Error(`Locale resolution failed for ${loc}`);
-  for (const k of keys) {
-    const val = i18n.t(k);
-    if (!val || val === k) throw new Error(`Missing translation for "${k}" in ${loc}`);
-  }
-}
-console.log("Verified", keys.size, "keys across all", locales.length, "locales.");
-'
+# 2. Verify + build clean Chrome Web Store / GitHub Release archive into dist/
+bash scripts/package.sh
 ```
+
+> **Note:** GitHub Actions (`.github/workflows/ci.yml`) automatically runs `node scripts/verify.mjs` and `bash scripts/package.sh` on every push and pull request.
+

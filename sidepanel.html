@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en" data-surface="sidepanel">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Antigravity Tab Status</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="brand">
+        <img src="icons/icon32.png" alt="" width="28" height="28" class="brand-logo" />
+        <div class="brand-text">
+          <h1 class="brand-title"><span data-i18n="brandTitle">Antigravity Tab Status</span> <span class="ver">v2.8.0</span></h1>
+          <p class="brand-subtitle" data-i18n="brandSubtitle">Pure tab status lights · Waiting / Unread first</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button
+          type="button"
+          id="openSidePanelBtn"
+          class="header-icon-btn"
+          data-i18n-aria-label="openSidePanelAria"
+          data-i18n-title="openSidePanelTitle"
+          aria-label="Open in Side Panel"
+          title="Open persistent Side Panel"
+        >
+          <span class="side-panel-glyph" aria-hidden="true"></span>
+        </button>
+        <div class="header-toggle">
+          <label for="enabledToggle" class="visually-hidden" data-i18n="toggleEnableLabel">Enable tab status lights</label>
+          <span class="switch">
+            <input type="checkbox" id="enabledToggle" role="switch" checked />
+            <span class="slider" aria-hidden="true"></span>
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div id="instanceBar" class="instance-bar hidden"></div>
+
+      <!-- Global status summary card -->
+      <section id="statusCard" class="card status-card" aria-labelledby="statusLabel">
+        <div class="status-row">
+          <div class="status-indicator-wrap">
+            <span id="statusDot" class="status-dot idle" data-indicator-style="glow" aria-hidden="true"></span>
+            <h2 id="statusLabel" class="status-label" data-i18n="statusDetecting">Detecting...</h2>
+          </div>
+          <button
+            type="button"
+            id="markAllReadBtn"
+            class="mark-read-btn hidden"
+            data-i18n="markAllRead"
+            data-i18n-title="markAllReadTitle"
+            title="Clear all unread markers and restore default tab icons"
+          >
+            Mark all read
+          </button>
+        </div>
+        <p id="statusReason" class="status-reason" data-i18n="statusConnecting">Connecting to current Antigravity tab...</p>
+
+        <div id="statPills" class="stat-pills hidden" data-i18n-aria-label="statOverviewAria" aria-label="Status count overview">
+          <span id="pillWaiting" class="stat-pill waiting">Waiting 0</span>
+          <span id="pillUnread" class="stat-pill unread">Unread 0</span>
+          <span id="pillRunning" class="stat-pill running">Running 0</span>
+          <span id="pillTotal" class="stat-pill neutral">0 projects · 0 chats</span>
+        </div>
+
+        <div id="actionBanner" class="action-banner hidden">
+          <button type="button" id="primaryActionBtn" class="primary-btn"></button>
+        </div>
+      </section>
+
+      <!-- Projects and conversations tree -->
+      <section id="projectsSection" class="card projects-card hidden" aria-labelledby="projectsHeading">
+        <div class="section-header">
+          <h2 id="projectsHeading" class="section-title" data-i18n="projectsHeading">Projects &amp; Conversations</h2>
+          <div class="section-header-actions">
+            <button
+              type="button"
+              id="syncCollapsedBtn"
+              class="mini-sync-btn"
+              data-i18n-title="syncBtnTitle"
+              title="Scan and refresh all projects (including collapsed)"
+            >
+              <span class="sync-glyph" aria-hidden="true"></span>
+              <span class="sync-label" data-i18n="syncBtn">Sync</span>
+            </button>
+            <div class="segmented mini" id="taskFilterGroup" role="group" data-i18n-aria-label="filterAria" aria-label="Filter conversations">
+              <button type="button" class="seg-btn active" data-filter="all" aria-pressed="true" data-i18n="filterAll">All</button>
+              <button type="button" class="seg-btn" data-filter="active" aria-pressed="false" data-i18n="filterActive">Active</button>
+            </div>
+          </div>
+        </div>
+
+        <ul id="projectsList" class="projects-list" role="list"></ul>
+      </section>
+
+      <!-- Settings, live preview & diagnostics -->
+      <details class="card advanced-panel">
+        <summary class="advanced-summary">
+          <span class="summary-text" data-i18n="settingsSummary">Light Style, Preview &amp; Diagnostics</span>
+          <span id="previewTag" class="preview-tag hidden" data-i18n="previewingTag">Previewing</span>
+        </summary>
+        <div class="advanced-body">
+          <div class="setting-block">
+            <span id="lightStyleLabel" class="row-label" data-i18n="lightStyleLabel">Status light style</span>
+            <div class="style-grid" id="indicatorStyleGroup" role="group" aria-labelledby="lightStyleLabel">
+              <button type="button" class="style-card-btn" data-style="antigravity" aria-pressed="false">
+                <span class="style-preview style-preview-antigravity" aria-hidden="true"></span>
+                <span class="style-meta">
+                  <span class="style-name" data-i18n="styleAntigravity">Antigravity</span>
+                  <span class="style-desc" data-i18n="styleAntigravityDesc">Native workspace icons</span>
+                </span>
+              </button>
+              <button type="button" class="style-card-btn" data-style="gemini" aria-pressed="false">
+                <span class="style-preview style-preview-gemini" aria-hidden="true"></span>
+                <span class="style-meta">
+                  <span class="style-name" data-i18n="styleGemini">Gemini</span>
+                  <span class="style-desc" data-i18n="styleGeminiDesc">Native Gemini sparkle</span>
+                </span>
+              </button>
+              <button type="button" class="style-card-btn active" data-style="glow" aria-pressed="true">
+                <span class="style-preview style-preview-glow" aria-hidden="true"></span>
+                <span class="style-meta">
+                  <span class="style-name" data-i18n="styleGlow">Luminous Orb</span>
+                  <span class="style-desc" data-i18n="styleGlowDesc">Soft glassy breathing orb</span>
+                </span>
+              </button>
+              <button type="button" class="style-card-btn" data-style="claude" aria-pressed="false">
+                <span class="style-preview style-preview-claude" aria-hidden="true"></span>
+                <span class="style-meta">
+                  <span class="style-name" data-i18n="styleClaude">Claude Sparkle</span>
+                  <span class="style-desc" data-i18n="styleClaudeDesc">Warm dynamic starburst</span>
+                </span>
+              </button>
+              <button type="button" class="style-card-btn" data-style="geek" aria-pressed="false">
+                <span class="style-preview style-preview-geek" aria-hidden="true">&gt;_</span>
+                <span class="style-meta">
+                  <span class="style-name" data-i18n="styleGeek">Geek Terminal</span>
+                  <span class="style-desc" data-i18n="styleGeekDesc">Neon CRT keycap badge</span>
+                </span>
+              </button>
+              <button type="button" class="style-card-btn" data-style="emoji" aria-pressed="false">
+                <span class="style-preview style-preview-emoji" aria-hidden="true">⚡</span>
+                <span class="style-meta">
+                  <span class="style-name" data-i18n="styleEmoji">Vivid Emoji</span>
+                  <span class="style-desc" data-i18n="styleEmojiDesc">Expressive emoji beacon</span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div class="compact-row">
+            <span id="iconLayoutLabel" class="row-label" data-i18n="iconLayoutLabel">Tab display mode</span>
+            <div class="segmented" id="iconLayoutGroup" role="group" aria-labelledby="iconLayoutLabel">
+              <button type="button" class="seg-btn active" data-layout="standalone" aria-pressed="true" data-i18n="layoutStandalone">Pure light</button>
+              <button type="button" class="seg-btn" data-layout="badge" aria-pressed="false" data-i18n="layoutBadge">Corner badge</button>
+            </div>
+          </div>
+
+          <div id="badgeSizeRow" class="compact-row hidden">
+            <span id="badgeSizeLabel" class="row-label" data-i18n="badgeSizeLabel">Corner light size</span>
+            <div class="segmented" id="badgeSizeGroup" role="group" aria-labelledby="badgeSizeLabel">
+              <button type="button" class="seg-btn active" data-size="standard" aria-pressed="true" data-i18n="sizeStandard">Standard</button>
+              <button type="button" class="seg-btn" data-size="large" aria-pressed="false" data-i18n="sizeLarge">Large</button>
+            </div>
+          </div>
+
+          <div class="compact-row">
+            <span id="actionClickLabel" class="row-label" data-i18n="actionClickLabel">Toolbar click opens</span>
+            <div class="segmented" id="actionClickModeGroup" role="group" aria-labelledby="actionClickLabel">
+              <button type="button" class="seg-btn active" data-click-mode="popup" aria-pressed="true" data-i18n="clickModePopup">Popup</button>
+              <button type="button" class="seg-btn" data-click-mode="sidepanel" aria-pressed="false" data-i18n="clickModeSidePanel">Side Panel</button>
+            </div>
+          </div>
+
+          <div class="compact-row toggle-row">
+            <div class="row-label-stack">
+              <label for="autoProbeCollapsedToggle" class="row-label" data-i18n="autoProbeLabel">Auto-probe collapsed projects</label>
+              <span id="autoProbeHint" class="row-hint" data-i18n="autoProbeHint">Off by default; prefers zero-flicker memory read</span>
+            </div>
+            <span class="switch mini-switch">
+              <input
+                type="checkbox"
+                id="autoProbeCollapsedToggle"
+                role="switch"
+                aria-describedby="autoProbeHint"
+              />
+              <span class="slider" aria-hidden="true"></span>
+            </span>
+          </div>
+
+          <div id="previewBlock" class="preview-block">
+            <span id="previewBlockLabel" class="row-label" data-i18n="previewLabel">Live preview tab status light</span>
+            <div class="preview-grid" role="group" aria-labelledby="previewBlockLabel">
+              <button type="button" class="preview-btn" data-preview="waiting" aria-pressed="false">
+                <span class="mini-badge waiting" aria-hidden="true">!</span>
+                <span data-i18n="previewWaiting">Waiting</span>
+              </button>
+              <button type="button" class="preview-btn" data-preview="unread" aria-pressed="false">
+                <span class="mini-badge unread" aria-hidden="true">✓</span>
+                <span data-i18n="previewUnread">Unread</span>
+              </button>
+              <button type="button" class="preview-btn" data-preview="running" aria-pressed="false">
+                <span class="mini-badge running loading-spinner" aria-hidden="true"></span>
+                <span data-i18n="previewRunning">Running</span>
+              </button>
+              <button type="button" class="preview-btn active" data-preview="clear" aria-pressed="true">
+                <span class="mini-badge clear" aria-hidden="true">↺</span>
+                <span data-i18n="previewAuto">Auto</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="divider" role="separator"></div>
+
+          <div class="field-group">
+            <label for="waitingSelector" data-i18n="customWaitingLabel">Extra Waiting CSS selector (optional)</label>
+            <input
+              type="text"
+              id="waitingSelector"
+              data-i18n-placeholder="customWaitingPlaceholder"
+              placeholder="e.g. button[aria-label='Approve']"
+              spellcheck="false"
+            />
+          </div>
+
+          <div class="field-group">
+            <label for="runningSelector" data-i18n="customRunningLabel">Extra Running CSS selector (optional)</label>
+            <input
+              type="text"
+              id="runningSelector"
+              data-i18n-placeholder="customRunningPlaceholder"
+              placeholder="e.g. [aria-label*='Agent working']"
+              spellcheck="false"
+            />
+          </div>
+
+          <div class="save-row">
+            <button type="button" id="inspectBtn" class="ghost-btn" data-i18n="inspectBtn">Copy diagnostics</button>
+            <div class="save-right">
+              <span id="saveFeedback" class="save-feedback" role="status" aria-live="polite"></span>
+              <button type="button" id="saveSelectorsBtn" class="secondary-btn" data-i18n="saveBtn">Save rules</button>
+            </div>
+          </div>
+        </div>
+      </details>
+    </main>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

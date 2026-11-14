@@ -1,5 +1,5 @@
 /**
- * Antigravity Tab Status - Child Iframe Reporter (v2.0.1)
+ * Antigravity Tab Status - Child Iframe Reporter (v2.7.0)
  *
  * 运行于 https://antigravity.google(.com) 内部的子工作区 iframe：
  * - 非 Antigravity 顶层页面首行 0.01ms 立即退出
@@ -12,6 +12,18 @@
   if (!window.__AGY_SCANNER__) return;
   if (window.__AGY_FRAME_REPORTER_V201__) return;
   window.__AGY_FRAME_REPORTER_V201__ = true;
+
+  const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  let topOrigin = '';
+  try {
+    const origins = window.location.ancestorOrigins;
+    if (origins && origins.length > 0) {
+      const candidate = origins[origins.length - 1] || '';
+      if (AGY_ORIGIN_RE.test(candidate)) {
+        topOrigin = candidate;
+      }
+    }
+  } catch {}
 
   const FRAME_UID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   let lastSnapshotHash = '';
@@ -55,10 +67,12 @@
     if (!force && hash === lastSnapshotHash) return;
     lastSnapshotHash = hash;
 
-    // 通道 1：直接 postMessage 零延迟上报至顶层窗口
-    try {
-      window.top.postMessage(snapshotPayload, '*');
-    } catch {}
+    // 通道 1：直接 postMessage 零延迟上报至顶层窗口（仅定向发送到已验证的 Antigravity 源）
+    if (topOrigin) {
+      try {
+        window.top.postMessage(snapshotPayload, topOrigin);
+      } catch {}
+    }
 
     // 通道 2：通过后台 Service Worker 转发至 frameId: 0（带回调消费 lastError，防止未捕获 Promise 报错）
     try {
@@ -80,6 +94,8 @@
 
   window.addEventListener('message', (event) => {
     if (shutdownIfInvalidated()) return;
+    if (event.source !== window.top) return;
+    if (!AGY_ORIGIN_RE.test(event.origin || '')) return;
     if (event.data?.type === 'AGY_FOCUS_TASK' && event.data.taskId) {
       if (
         window.__AGY_SCANNER__.focusTaskById(
@@ -94,6 +110,8 @@
       window.__AGY_SCANNER__.probeCollapsedProjects?.(true).then(() => {
         dispatchSnapshot(true);
       });
+    } else if (event.data?.type === 'AGY_SYNC_NOW') {
+      runWithTimestamp(true);
     }
   });
 
@@ -117,6 +135,9 @@
           window.__AGY_SCANNER__.probeCollapsedProjects?.(true).then(() => {
             dispatchSnapshot(true);
           });
+          sendResponse({ ok: true });
+        } else if (message?.type === 'SYNC_NOW_IN_FRAME') {
+          runWithTimestamp(true);
           sendResponse({ ok: true });
         }
         return false;
@@ -168,6 +189,23 @@
       chrome.storage.onChanged.addListener(() => runWithTimestamp(true));
     }
   } catch {}
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) runWithTimestamp(true);
+  });
+  window.addEventListener('focus', () => runWithTimestamp(true));
+  window.addEventListener('pagehide', () => {
+    try {
+      if (isContextAlive()) {
+        chrome.runtime.sendMessage(
+          { type: 'CHILD_FRAME_UNLOAD', frameUid: FRAME_UID },
+          () => {
+            void chrome.runtime.lastError;
+          }
+        );
+      }
+    } catch {}
+  });
 
   heartbeatId = setInterval(() => runWithTimestamp(true), 900);
   runWithTimestamp(true);

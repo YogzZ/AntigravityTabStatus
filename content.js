@@ -1,5 +1,5 @@
 /**
- * Antigravity Tab Status - Top Frame Multi-Project Aggregator & Tab Status Light Presenter (v2.7.0)
+ * Antigravity Tab Status - Top Frame Multi-Project Aggregator & Tab Status Light Presenter (v2.8.0)
  *
  * 严格兼容页面 Content Security Policy (worker-src 'self' / img-src 'self')：
  * - 完全移除页面内 Blob / Worker 创建，改用扩展后台 Service Worker Port 驱动动画与防抖计时器
@@ -20,6 +20,72 @@
   const COMPLETION_DEBOUNCE_MS = 1500;
   const TITLE_SUFFIX_RE =
     /\s*·\s*(?:🔴|🔔|🟠|🟢|✅|🔵|⏳)\s*(?:待处理|未读|运行中|Waiting|Unread|Running)(?:\(\d+\))?$/;
+  const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const ALLOWED_CHILD_SITE_DOMAINS = [
+    'antigravity.google.com',
+    'antigravity.google',
+    'usercontent.goog'
+  ];
+
+  function isAllowedChildOrigin(rawOrigin) {
+    if (typeof rawOrigin !== 'string' || !rawOrigin || rawOrigin === 'null') return false;
+    try {
+      const parsed = new URL(rawOrigin);
+      if (parsed.origin === 'null' || parsed.protocol !== 'https:') return false;
+      const host = parsed.hostname.toLowerCase();
+      return ALLOWED_CHILD_SITE_DOMAINS.some(
+        (domain) => host === domain || host.endsWith(`.${domain}`)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function isMountedChildFrameWindow(sourceWin) {
+    if (!sourceWin || sourceWin === window) return false;
+    try {
+      return Array.from(document.querySelectorAll('iframe')).some(
+        (frameEl) => frameEl.contentWindow === sourceWin
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function resolveIframeTargetOrigin(frameEl) {
+    if (!frameEl) return '';
+    try {
+      const childOrigin = frameEl.contentWindow?.location?.origin;
+      if (isAllowedChildOrigin(childOrigin)) {
+        return childOrigin;
+      }
+      const childHref = frameEl.contentWindow?.location?.href || '';
+      if (
+        (childHref === 'about:blank' || childHref.startsWith('about:srcdoc')) &&
+        AGY_ORIGIN_RE.test(window.location.origin)
+      ) {
+        return window.location.origin;
+      }
+    } catch {}
+    const rawSrc = frameEl.getAttribute('src') || frameEl.src || '';
+    if (!rawSrc || rawSrc.startsWith('about:')) {
+      return AGY_ORIGIN_RE.test(window.location.origin) ? window.location.origin : '';
+    }
+    try {
+      const parsed = new URL(rawSrc, window.location.href);
+      return isAllowedChildOrigin(parsed.origin) ? parsed.origin : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function postToAntigravityIframe(frameEl, payload) {
+    const targetOrigin = resolveIframeTargetOrigin(frameEl);
+    if (!targetOrigin) return;
+    try {
+      frameEl.contentWindow?.postMessage(payload, targetOrigin);
+    } catch {}
+  }
 
   const VALID_STYLES = new Set(['antigravity', 'gemini', 'glow', 'claude', 'geek', 'emoji']);
   const VALID_LAYOUTS = new Set(['standalone', 'badge']);
@@ -1399,6 +1465,22 @@
     return String(rawTitle || '').replace(TITLE_SUFFIX_RE, '').trimEnd();
   }
 
+  function deriveWorkspaceLabel() {
+    const rawTitle = stripTitleStatusSuffix(savedBaseTitle || document.title || '').trim();
+    const cleaned = rawTitle
+      .replace(/\s*(?:[-–—|·•]\s*)?(?:Google\s+)?Antigravity\s*$/i, '')
+      .replace(/^(?:Google\s+)?Antigravity\s*(?:[-–—|·•]\s*)?/i, '')
+      .trim();
+    if (cleaned) return cleaned;
+    if (Array.isArray(latestProjects) && latestProjects.length === 1 && latestProjects[0]?.projectName) {
+      return latestProjects[0].projectName;
+    }
+    if (Array.isArray(latestProjects) && latestProjects.length > 1 && latestProjects[0]?.projectName) {
+      return `${latestProjects[0].projectName} +${latestProjects.length - 1}`;
+    }
+    return rawTitle || location.hostname;
+  }
+
   function syncTabTitlePresentation() {
     const currentRaw = document.title || '';
     const currentStripped = stripTitleStatusSuffix(currentRaw);
@@ -1550,8 +1632,19 @@
 
     ingestProjects(topScan.projects, 'top');
 
+    const hasMountedIframe = Boolean(document.querySelector('iframe'));
+    let newestChildTs = 0;
+    if (hasMountedIframe) {
+      for (const entry of childFrames.values()) {
+        if (entry.ts > newestChildTs) newestChildTs = entry.ts;
+      }
+    }
+
     for (const [frameKey, entry] of childFrames.entries()) {
-      if (now - entry.ts > 6500) {
+      const expired = hasMountedIframe
+        ? entry.ts < newestChildTs && now - entry.ts > 15000
+        : now - entry.ts > 6500;
+      if (expired) {
         childFrames.delete(frameKey);
         continue;
       }
@@ -1682,13 +1775,13 @@
           rec.stickyWaitingReason = task.reason || '';
           stickyWaitingByTitle.set(titleKey, { reason: rec.stickyWaitingReason, ts: now });
         } else if (rec.stickyWaiting || stickyWaitingByTitle.has(titleKey)) {
-          if (
-            (task.isActive && task.state !== 'waiting') ||
-            (task.state === 'running' && task.confirmedRunning) ||
-            task.state === 'unread'
-          ) {
+          // 注意：后台任务的 confirmedRunning 只说明桥接器缓存里的对话对象写着 RUNNING，
+          // 很可能是提问前的旧详情快照（runStatus 仍为 RUNNING、无 waiting 字段），不能据此
+          // 清除已确认的 waiting。唯一能证明 waiting 结束的证据是：点开该对话后面板显示
+          // 非 waiting（isActive 分支），或变 unread/idle（下方 debounce 分支）。
+          if ((task.isActive && task.state !== 'waiting') || task.state === 'unread') {
             clearStickyWaiting();
-          } else if (!task.isActive && task.state === 'running' && !task.confirmedRunning) {
+          } else if (!task.isActive && task.state === 'running') {
             const stickyRsn =
               rec.stickyWaitingReason || stickyWaitingByTitle.get(titleKey)?.reason || '';
             task.state = 'waiting';
@@ -1859,15 +1952,18 @@
           rec = {
             lastActiveState: null,
             lastActiveTs: 0,
+            stickyWaiting: false,
+            stickyWaitingReason: '',
             runtimeUnread: false,
             dismissedUnread: true,
-            wasDomUnread: false,
+            wasDomUnread: task.state === 'unread',
             wasActive: Boolean(task.isActive)
           };
           taskTracker.set(task.taskId, rec);
         } else {
           rec.runtimeUnread = false;
           rec.dismissedUnread = true;
+          rec.wasDomUnread = task.state === 'unread';
         }
       }
     }
@@ -1894,6 +1990,13 @@
 
   window.addEventListener('message', (event) => {
     if (shutdownIfInvalidated()) return;
+    const rawOrigin = event.origin || '';
+    const originTrusted =
+      event.source &&
+      event.source !== window &&
+      (isAllowedChildOrigin(rawOrigin) ||
+        (rawOrigin === 'null' && isMountedChildFrameWindow(event.source)));
+    if (!originTrusted) return;
     const data = event.data;
     if (!data || typeof data !== 'object') return;
     if (data.type === 'ANTIGRAVITY_WORKSPACE_SYNC') {
@@ -1925,6 +2028,12 @@
         return false;
       }
 
+      if (message.type === 'RELAYED_CHILD_UNLOAD' && message.frameKey) {
+        childFrames.delete(message.frameKey);
+        evaluateAllProjects();
+        return false;
+      }
+
       if (message.type === 'FOCUS_TASK_IN_FRAME' && message.taskId) {
         const hit = window.__AGY_SCANNER__
           ? window.__AGY_SCANNER__.focusTaskById(
@@ -1946,9 +2055,7 @@
         }
         if (message.type === 'PROBE_COLLAPSED') {
           for (const frameEl of document.querySelectorAll('iframe')) {
-            try {
-              frameEl.contentWindow?.postMessage({ type: 'AGY_PROBE_COLLAPSED' }, '*');
-            } catch {}
+            postToAntigravityIframe(frameEl, { type: 'AGY_PROBE_COLLAPSED' });
           }
         }
         evaluateAllProjects();
@@ -1957,6 +2064,16 @@
       }
 
       if (message.type === 'GET_STATUS') {
+        if (childFrames.size === 0 && document.querySelector('iframe')) {
+          try {
+            chrome.runtime.sendMessage({ type: 'PING_CHILD_FRAMES' }, () => {
+              void chrome.runtime.lastError;
+            });
+          } catch {}
+          for (const frameEl of document.querySelectorAll('iframe')) {
+            postToAntigravityIframe(frameEl, { type: 'AGY_SYNC_NOW' });
+          }
+        }
         evaluateAllProjects();
         sendResponse({
           ok: true,
@@ -1964,6 +2081,9 @@
           indicatorStyle: config.indicatorStyle,
           iconLayout: config.iconLayout,
           badgeSize: config.badgeSize,
+          pageTitle: stripTitleStatusSuffix(savedBaseTitle || document.title || ''),
+          workspaceLabel: deriveWorkspaceLabel(),
+          pageUrl: location.href,
           state: getEffectiveGlobalState(),
           detectedState: currentGlobalState,
           counts: latestCounts,
@@ -2009,17 +2129,12 @@
         }
         if (!hitTop) {
           for (const frameEl of document.querySelectorAll('iframe')) {
-            try {
-              frameEl.contentWindow?.postMessage(
-                {
-                  type: 'AGY_FOCUS_TASK',
-                  taskId: message.taskId,
-                  projectName: message.projectName || '',
-                  taskTitle: message.taskTitle || ''
-                },
-                '*'
-              );
-            } catch {}
+            postToAntigravityIframe(frameEl, {
+              type: 'AGY_FOCUS_TASK',
+              taskId: message.taskId,
+              projectName: message.projectName || '',
+              taskTitle: message.taskTitle || ''
+            });
           }
         }
         evaluateAllProjects();
@@ -2059,8 +2174,8 @@
     });
 
     chrome.storage.sync.get(DEFAULT_CONFIG, (items) => {
-      if (chrome.runtime.lastError) return;
-      config = normalizeConfig(items);
+      const hasStorageError = Boolean(chrome.runtime.lastError);
+      config = normalizeConfig(hasStorageError ? DEFAULT_CONFIG : items);
       rebuildAllFrames();
       evaluateAllProjects();
       syncTabPresentation();
@@ -2157,6 +2272,15 @@
     evaluateAllProjects();
     syncTabTitlePresentation();
   }, 900);
+  window.addEventListener('pagehide', () => {
+    if (!isContextAlive()) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'TOP_FRAME_UNLOAD' }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch {}
+  });
+
   ensureBaseIconLoaded(true).then(() => {
     evaluateAllProjects();
     syncTabPresentation();
