@@ -1800,9 +1800,9 @@
     const mergedProjects = [];
     for (const [projectName, entry] of projectMap.entries()) {
       let tasks = Array.from(entry.taskMap.values());
-      if (tasks.length > 0 || entry.knownEmpty) {
+      if (tasks.length > 0 || entry.knownEmpty || !entry.isCollapsed) {
         topCollapsedCache.set(projectName, {
-          knownEmpty: Boolean(entry.knownEmpty && tasks.length === 0),
+          knownEmpty: Boolean((entry.knownEmpty || !entry.isCollapsed) && tasks.length === 0),
           projectType: entry.projectType,
           tasks: tasks.map((task) => ({ ...task }))
         });
@@ -1910,14 +1910,18 @@
     let firstWaitingSample = '';
     let firstUnreadSample = '';
     let firstRunningSample = '';
+    const seenTaskIds = new Set();
+    const seenStickyKeys = new Set();
 
     for (const proj of mergedProjects) {
       for (const task of proj.tasks) {
+        seenTaskIds.add(task.taskId);
         let rec = taskTracker.get(task.taskId);
         if (!rec) {
           rec = {
             lastActiveState: null,
             lastActiveTs: 0,
+            lastSeenTs: now,
             stickyWaiting: false,
             stickyWaitingReason: '',
             runtimeUnread: false,
@@ -1926,9 +1930,14 @@
             wasActive: Boolean(task.isActive)
           };
           taskTracker.set(task.taskId, rec);
+        } else {
+          rec.lastSeenTs = now;
         }
 
-        const titleKey = makeCanonicalTaskTitleKey(proj.projectName, task.title);
+        const titleKey = task.convId
+          ? `conv::${task.convId}`
+          : makeCanonicalTaskTitleKey(proj.projectName, task.title);
+        seenStickyKeys.add(titleKey);
         const clearStickyWaiting = () => {
           rec.stickyWaiting = false;
           rec.stickyWaitingReason = '';
@@ -2027,6 +2036,17 @@
           projectType: proj.projectType,
           tasks: proj.tasks.map((task) => ({ ...task }))
         });
+      }
+    }
+
+    for (const [key, entry] of stickyWaitingByTitle.entries()) {
+      if (!seenStickyKeys.has(key) && now - (entry?.ts || 0) > 15000) {
+        stickyWaitingByTitle.delete(key);
+      }
+    }
+    for (const [tid, rec] of taskTracker.entries()) {
+      if (!seenTaskIds.has(tid) && now - (rec?.lastSeenTs || 0) > 15000) {
+        taskTracker.delete(tid);
       }
     }
 

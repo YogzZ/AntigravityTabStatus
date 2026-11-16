@@ -128,6 +128,7 @@
   const netProjectsById = new Map();
   const netProjectsByName = new Map();
   const netConvsById = new Map();
+  let authoritativeTrajectoryIds = null;
   const MAX_NET_CACHE_ENTRIES = 1000;
 
   function pruneMapToLimit(map, limit = MAX_NET_CACHE_ENTRIES) {
@@ -1695,6 +1696,10 @@
       step.modelUsage ??
       step.plannerResponse?.modelUsage ??
       step.metadata?.generatorMetadata?.modelUsage ??
+      step.usageMetadata ??
+      step.metadata?.usageMetadata ??
+      step.plannerResponse?.usageMetadata ??
+      step.metadata?.tokenUsage ??
       step.usage ??
       step.tokenUsage;
     const fallbackModel = String(
@@ -1717,12 +1722,18 @@
     }
     const model = String(rawMu.model ?? rawMu.modelId ?? rawMu.modelName ?? fallbackModel).trim();
     const inputTokens = toNonNegInt(
-      rawMu.inputTokens ?? rawMu.input_tokens ?? rawMu.promptTokens ?? rawMu.prompt_tokens
+      rawMu.inputTokens ??
+        rawMu.input_tokens ??
+        rawMu.promptTokens ??
+        rawMu.prompt_tokens ??
+        rawMu.promptTokenCount ??
+        rawMu.prompt_token_count
     );
     const cacheReadTokens = toNonNegInt(
       rawMu.cacheReadTokens ??
         rawMu.cache_read_tokens ??
         rawMu.cachedContentTokenCount ??
+        rawMu.cached_content_token_count ??
         rawMu.cacheReadInputTokens ??
         rawMu.cache_read_input_tokens
     );
@@ -1736,6 +1747,7 @@
       rawMu.outputTokens ??
         rawMu.output_tokens ??
         rawMu.candidatesTokenCount ??
+        rawMu.candidates_token_count ??
         rawMu.completionTokens ??
         rawMu.completion_tokens
     );
@@ -2189,13 +2201,22 @@
     return '';
   }
 
-  function ingestTrajectorySummaries(summariesObj) {
+  function ingestTrajectorySummaries(summariesObj, { isAuthoritative = false } = {}) {
     if (!summariesObj || typeof summariesObj !== 'object') return false;
     const pairs =
       summariesObj instanceof Map
         ? Array.from(summariesObj.entries())
         : Object.entries(summariesObj);
-    if (pairs.length === 0) return false;
+    if (pairs.length === 0) {
+      if (isAuthoritative) {
+        authoritativeTrajectoryIds = new Set();
+        if (netConvsById.size > 0) {
+          netConvsById.clear();
+          return true;
+        }
+      }
+      return false;
+    }
 
     // 按更新时间升序插入，确保 FIFO 淘汰最旧对话、保留最新 40 条
     const sorted = pairs
@@ -2210,6 +2231,22 @@
       .sort((a, b) => a.ts - b.ts);
 
     let changed = false;
+    if (isAuthoritative) {
+      const nextIds = new Set(sorted.map((item) => item.id));
+      authoritativeTrajectoryIds = nextIds;
+      for (const [k, rec] of netConvsById.entries()) {
+        if (rec?.convId && !nextIds.has(rec.convId)) {
+          netConvsById.delete(k);
+          changed = true;
+        }
+      }
+      for (const id of convTelemetryById.keys()) {
+        if (!nextIds.has(id)) {
+          convTelemetryById.delete(id);
+          changed = true;
+        }
+      }
+    }
     for (const { id, val } of sorted) {
       const entry = getOrCreateConvTelemetry(id);
       const norm = normalizeConvState(val);
@@ -2250,8 +2287,12 @@
   function ingestTelemetryDataTree(rootVal, meta = {}) {
     if (!rootVal || typeof rootVal !== 'object') return false;
     const visited = meta.visited instanceof WeakSet ? meta.visited : new WeakSet();
-    let budget = meta.source === 'fiber' ? 280 : 450;
+    let budget = meta.source === 'fiber' ? 350 : 500;
     let changed = false;
+    const isAuthoritativeTrajectories = Boolean(
+      meta.endpoint === 'GetAllCascadeTrajectories' ||
+        (typeof meta.url === 'string' && /GetAllCascadeTrajectories\b/i.test(meta.url))
+    );
 
     function walk(val, depth, inheritedConvId, parentKey) {
       if (budget <= 0 || depth > 7 || isBlockedBridgeValue(val)) return;
@@ -2313,11 +2354,18 @@
 
         // 3. 捕获 `trajectorySummaries`
         if (val.trajectorySummaries && typeof val.trajectorySummaries === 'object') {
-          if (ingestTrajectorySummaries(val.trajectorySummaries)) changed = true;
+          if (ingestTrajectorySummaries(val.trajectorySummaries, { isAuthoritative: isAuthoritativeTrajectories })) {
+            changed = true;
+          }
         }
 
         // 4. 捕获 `steps` / `trajectory.steps` / `turns` / `messages`
-        const localConvId = extractDirectConvId(val, parentKey) || inheritedConvId;
+        const localConvId =
+          extractDirectConvId(val, parentKey) ||
+          extractDirectConvId(val.trajectory, '') ||
+          extractDirectConvId(val.cascade, '') ||
+          extractDirectConvId(val.metadata, '') ||
+          inheritedConvId;
         const primarySteps = Array.isArray(val.steps)
           ? val.steps
           : Array.isArray(val.trajectory?.steps)
@@ -2788,6 +2836,12 @@
         addCandidate(conv.convId);
       }
     }
+    if (candidateIds.length < 3 && convTelemetryById.size > 0) {
+      const recentIds = Array.from(convTelemetryById.keys());
+      for (let i = recentIds.length - 1; i >= 0 && candidateIds.length < 3; i--) {
+        addCandidate(recentIds[i]);
+      }
+    }
 
     const targets = candidateIds.slice(0, 3);
     for (const convId of targets) {
@@ -3129,7 +3183,9 @@
           ? obj.steps
           : Array.isArray(obj.trajectory?.steps)
             ? obj.trajectory.steps
-            : null;
+            : Array.isArray(obj.cascade?.trajectory?.steps)
+              ? obj.cascade.trajectory.steps
+              : null;
         const fallbackTurns = !primarySteps
           ? Array.isArray(obj.turns)
             ? obj.turns
@@ -3149,7 +3205,7 @@
         }
       };
 
-      for (let depth = 0; depth < 45 && fiber; depth++, fiber = fiber.return) {
+      for (let depth = 0; depth < 80 && fiber; depth++, fiber = fiber.return) {
         if (!reachedShared && fiberContainsMultipleSelector(fiber, '.agy-composer-footer')) {
           reachedShared = true;
         }
@@ -3435,7 +3491,7 @@
     }
 
     // 扫描 `.agy-composer-footer` 面板提取当前模型、配额与会话步骤
-    const { composers, rootFound: composerRoot, urlConvId } = scanComposerFooters(telemetryVisited);
+    const { composers, rootFound: composerRoot, urlConvId } = scanComposerFooters(new WeakSet());
     if (!firstRoot && composerRoot) {
       firstRoot = composerRoot;
     }
@@ -3458,7 +3514,7 @@
         lowerToCanonical,
         outProjects,
         outConvs,
-        telemetryVisited
+        new WeakSet()
       );
     }
 
@@ -3476,7 +3532,7 @@
               '',
               ''
             );
-            ingestTelemetryDataTree(q.state.data, { source: 'fiber', visited: telemetryVisited });
+            ingestTelemetryDataTree(q.state.data, { source: 'fiber' });
           }
         }
       } catch {}
@@ -3485,7 +3541,7 @@
       try {
         const stVal = st.getState();
         scanArbitraryDataTree(stVal, knownLowerNames, lowerToCanonical, outProjects, outConvs, '', '');
-        ingestTelemetryDataTree(stVal, { source: 'fiber', visited: telemetryVisited });
+        ingestTelemetryDataTree(stVal, { source: 'fiber' });
       } catch {}
     }
 
@@ -3500,6 +3556,14 @@
     pruneMapToLimit(netProjectsByName);
     pruneMapToLimit(netConvsById);
     for (const [k, netRec] of netConvsById.entries()) {
+      if (
+        authoritativeTrajectoryIds &&
+        netRec?.convId &&
+        !authoritativeTrajectoryIds.has(netRec.convId)
+      ) {
+        netConvsById.delete(k);
+        continue;
+      }
       if (!outConvs.has(k)) {
         outConvs.set(k, { ...netRec });
       }
@@ -3537,14 +3601,15 @@
       }
 
       let targetProjName = '';
-      if (conv.projectName && lowerToCanonical.has(conv.projectName.toLowerCase())) {
-        targetProjName = lowerToCanonical.get(conv.projectName.toLowerCase());
-      } else if (conv.projectId && outProjects.byId.has(conv.projectId)) {
+      if (conv.projectId && outProjects.byId.has(conv.projectId)) {
         const mapped = outProjects.byId.get(conv.projectId).name;
         if (mapped && lowerToCanonical.has(mapped.toLowerCase())) {
           targetProjName = lowerToCanonical.get(mapped.toLowerCase());
         }
-      } else if (Array.isArray(conv.workspaceNames)) {
+      }
+      if (!targetProjName && conv.projectName && lowerToCanonical.has(conv.projectName.toLowerCase())) {
+        targetProjName = lowerToCanonical.get(conv.projectName.toLowerCase());
+      } else if (!targetProjName && Array.isArray(conv.workspaceNames)) {
         for (const wName of conv.workspaceNames) {
           const lowW = String(wName || '').toLowerCase();
           if (lowW && lowerToCanonical.has(lowW)) {
@@ -3556,6 +3621,8 @@
 
       if (!targetProjName || !projectsResult[targetProjName]) continue;
       const pid = projectsResult[targetProjName].projectId;
+      // 若当前同名项目已有明确 projectId，且对话归属于另一个不同的 projectId（例如已删除的旧同名项目），跳过
+      if (pid && conv.projectId && conv.projectId !== pid) continue;
       const computedHref =
         conv.href ||
         (conv.convId && pid

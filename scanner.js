@@ -3261,8 +3261,17 @@
 
       const state = capsuleStateMap.get(host) || buildCapsuleInstance(host);
       const compEntry = composers[idx] || null;
-      const convId = compEntry?.convId || telemetry?.activeConvId || '';
-      const convData = (convId && convs[convId]) || null;
+      const rawCompConvId = compEntry?.convId || '';
+      const isSyntheticCompId = rawCompConvId.startsWith('composer-panel-');
+      const convId =
+        (!isSyntheticCompId && rawCompConvId) ||
+        telemetry?.activeConvId ||
+        rawCompConvId ||
+        '';
+      const convData =
+        (convId && convs[convId]) ||
+        (telemetry?.activeConvId && convs[telemetry.activeConvId]) ||
+        null;
       updateCapsuleState(state, convData, compEntry, telemetry || null);
     }
 
