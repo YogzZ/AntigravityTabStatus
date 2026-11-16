@@ -1,6 +1,6 @@
 **English** | [简体中文](./README.zh-CN.md)
 
-# Antigravity Tab Status (`v2.8.0`)
+# Antigravity Tab Status (`v2.9.0`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-34a853.svg)](./manifest.json)
@@ -12,7 +12,14 @@ A lightweight, privacy-first **Manifest V3** browser extension (Chrome / Edge / 
 
 ---
 
-## Key Features (`v2.8.0`)
+## Key Features (`v2.9.0`)
+
+- **5-Hour Model Quota Pools, Context Tokens & Streaming `tok/s` Telemetry**
+  - **5h Quota Pool Strip:** Displays live remaining quota percentages and reset countdowns across `Gemini` and `Claude / GPT` pools in the Popup and Side Panel using native `<progress>` health bars.
+  - **Per-Chat Context & Speed Metrics:** Surfaces context token usage (`used/limit, pct%`), live streaming `tok/s`, auto-compaction drop chips (`-drop%`), and exact Cache / In / Out / Hit% tooltips when exact `modelUsage` snapshots are available (falling back honestly to `~estimated` without fabricating cache ratios).
+  - **Optional In-Page Composer Capsule (Off by Default):** Enable **Show in-page composer capsule** in settings (`showInPageCapsule`) to mount an isolated Shadow DOM usage pill (`WeakMap`-backed, zero `innerHTML`/`localStorage`, WCAG 1.4.13 hover/keyboard/Escape tooltip) next to Antigravity's composer controls.
+- **Opt-In Localhost Desktop Webview Support**
+  - Click **Enable** next to **Local Antigravity (localhost)** in settings to grant optional `http://localhost/*` and `http://127.0.0.1/*` access on demand (`optional_host_permissions` + `scripting`), revocable anytime. Even when enabled, scripts verify Antigravity host markers (`isVerifiedLocalAntigravity()`) and stay completely inert on unrelated local dev servers.
 
 - **Cross-Tab Global Panel & Persistent Chrome Side Panel**
   - **Monitor from Any Webpage:** Click the toolbar icon on *any* website to view live Antigravity workspaces, projects, conversations, and global Waiting/Unread badge counts—no need to switch back to check progress.
@@ -44,13 +51,13 @@ A lightweight, privacy-first **Manifest V3** browser extension (Chrome / Edge / 
 - **Automatic 10-Language Support**
   - Automatically adapts the popup, status reasons, and extension manifest metadata to your browser UI language across **10 locales**:
     `en`, `zh_CN`, `zh_TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt_BR`, `ru`.
-- **Zero-Click React Memory Bridge**
-  - `page-bridge.js` runs in MV3 `world: "MAIN"` with a **500ms cache** to read collapsed and expanded projects from React 18/19 Fiber, TanStack QueryCache, Zustand/Redux stores, and passive network streams (`< 0.1ms` on cached bursts, zero sidebar flicker).
+- **Zero-Click React Memory Bridge & Gated Same-Origin Telemetry**
+  - `page-bridge.js` runs in MV3 `world: "MAIN"` with a **500ms cache** to read collapsed and expanded projects, quota info, and context usage from React 18/19 Fiber, TanStack QueryCache, Zustand/Redux stores, and passive network streams (`< 0.1ms` on cached bursts, zero sidebar flicker). When the tab is visible and Antigravity's same-origin `LanguageServerService` endpoint or `csrfToken` is observed, read-only same-origin Connect-RPC queries (`GetUserStatus`, `GetAllCascadeTrajectories`, incremental `GetCascadeTrajectorySteps`) supplement live telemetry.
   - Click any conversation inside the popup—even inside a collapsed project—to auto-expand and jump directly to it.
 - **Zero CSP Violations & Privacy First**
-  - **No Blob Workers**, no `eval()`, and no remote telemetry or analytics (see [Privacy Policy](./PRIVACY.md)).
+  - **No Blob Workers**, no `eval()`, no `localStorage`, and no remote developer telemetry or analytics (see [Privacy Policy](./PRIVACY.md)).
   - Background timers and `OffscreenCanvas` favicon decoding run inside the extension Service Worker (`background.js`).
-  - Requests only `storage` and `sidePanel` permissions (never `tabs` or `<all_urls>`), with `content_scripts` and `host_permissions` scoped strictly to Antigravity origins (`antigravity.google` / `antigravity.google.com`), embedded workspace iframe hosts (`*.usercontent.goog`, verified via `location.ancestorOrigins`), and `gstatic.com` favicons.
+  - Requests only `storage`, `sidePanel`, and `scripting` permissions (never `tabs` or `<all_urls>`), with mandatory `content_scripts` and `host_permissions` scoped strictly to Antigravity origins (`antigravity.google` / `antigravity.google.com`), embedded workspace iframe hosts (`*.usercontent.goog`, verified via `location.ancestorOrigins`), and `gstatic.com` favicons, plus opt-in `optional_host_permissions` for `http://localhost/*` and `http://127.0.0.1/*`.
 
 ---
 
@@ -67,7 +74,7 @@ A lightweight, privacy-first **Manifest V3** browser extension (Chrome / Edge / 
 ### Option B: Load or Package from Source
 
 1. Clone this repository (`git clone https://github.com/YogzZ/AntigravityTabStatus.git`).
-2. *(Optional)* Run verification and build a clean runtime-only archive (`dist/antigravity-tab-status-v2.8.0.zip`):
+2. *(Optional)* Run verification and build a clean runtime-only archive (`dist/antigravity-tab-status-v2.9.0.zip`):
    ```bash
    node scripts/verify.mjs
    bash scripts/package.sh
@@ -81,18 +88,19 @@ A lightweight, privacy-first **Manifest V3** browser extension (Chrome / Edge / 
 ## Architecture Overview
 
 ```text
-Antigravity Page (MAIN world)
-  └─ page-bridge.js ──(500ms cache + Fiber/QueryCache/Stream read)──┐
-                                                                    ▼
+Antigravity Page / Verified Localhost (MAIN world)
+  └─ page-bridge.js ──(500ms cache + Fiber/QueryCache/Stream + gated LS RPC)──┐
+                                                                               ▼
 Antigravity Page & Iframes (ISOLATED world)
-  ├─ i18n.js ──► scanner.js ──► frame-detector.js (child iframes) ──┼──► background.js (SW)
-  └─ i18n.js ──► scanner.js ──► content.js (top frame aggregator) ◄─┘    ├─ agy-timer Port
-                                    │                                    ├─ OffscreenCanvas favicon decode
-                                    ▼                                    └─ chrome.action badge + relays
+  ├─ i18n.js ──► scanner.js ──► frame-detector.js (child iframes + capsule) ───┼──► background.js (SW)
+  └─ i18n.js ──► scanner.js ──► content.js (top aggregator + Shadow capsule) ◄─┘    ├─ agy-timer Port + scripting
+                                    │                                               ├─ OffscreenCanvas favicon decode
+                                    ▼                                               └─ chrome.action badge + relays
                       64x64 Canvas Tab Status Light
                                     ▲
                                     │ (chrome.storage.sync/session + cross-tab runtime messaging)
                       popup.html / sidepanel.html / popup.css / popup.js
+                      (5h Quota Strip + Context/tok/s + Localhost Permission Toggle)
 ```
 
 ---
@@ -101,23 +109,23 @@ Antigravity Page & Iframes (ISOLATED world)
 
 | File / Directory | Purpose |
 | :--- | :--- |
-| `manifest.json` | Manifest V3 configuration (`v2.8.0`), `default_locale: "en"`, `storage` + `sidePanel` permissions, scoped `host_permissions`, `MAIN` & `ISOLATED` content scripts |
-| `background.js` | MV3 Service Worker: `agy-timer` Port timers, `OffscreenCanvas` favicon pixel decoder, session-backed global toolbar badge aggregator, `actionClickMode` sync, and frame message relays |
-| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber, store, and passive network observer with 500ms cache |
-| `i18n.js` | Browser-language auto-detector and 10-locale dictionary (`window.__AGY_I18N__`) for popup, scanner, and content reasons |
-| `scanner.js` | Unified sidebar & active-pane scanner merging DOM, memory bridge snapshots, and collapsed-project caches |
-| `content.js` | Top-frame global priority engine, 64x64 Canvas renderer (6 styles × 2 layouts), legacy title suffix cleaner, and Port animation driver |
-| `frame-detector.js` | Child-iframe workspace scanner reporting updates to the top frame |
-| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | Dual-surface light/dark UI (toolbar Popup + `100dvh` responsive Chrome Side Panel) with cross-tab instance switcher, project/conversation jump list, 2x3 style picker, mount layout & toolbar-click settings, preview mode, and diagnostics |
+| `manifest.json` | Manifest V3 configuration (`v2.9.0`), `default_locale: "en"`, `storage` + `sidePanel` + `scripting` permissions, scoped `host_permissions`, opt-in `optional_host_permissions` (`localhost`/`127.0.0.1`), `MAIN` & `ISOLATED` content scripts |
+| `background.js` | MV3 Service Worker: `agy-timer` Port timers, `OffscreenCanvas` favicon pixel decoder, session-backed global toolbar badge aggregator, `actionClickMode` sync, opt-in localhost script registration/injection, and frame message relays |
+| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber, store, passive network observer (500ms cache, 40-conversation step summary cap), gated same-origin Connect-RPC, and v2.9.0 quota/context/tok/s telemetry engine |
+| `i18n.js` | Browser-language auto-detector and 161-key 10-locale dictionary (`window.__AGY_I18N__`) with Antigravity & opt-in localhost host guard |
+| `scanner.js` | Unified sidebar & active-pane scanner merging DOM, memory bridge snapshots/telemetry, collapsed-project caches, and opt-in isolated Shadow DOM composer capsule |
+| `content.js` | Top-frame global priority & telemetry merger, 64x64 Canvas renderer (6 styles × 2 layouts), legacy title suffix cleaner, Shadow DOM capsule sync, and Port animation driver |
+| `frame-detector.js` | Child-iframe workspace scanner relaying state, telemetry, and Shadow DOM capsule updates |
+| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | Dual-surface light/dark UI (toolbar Popup + `100dvh` responsive Chrome Side Panel) with 5h quota pool strip, per-chat context/tok/s/compaction chips, cross-tab instance switcher, project/conversation jump list, 2x3 style picker, optional localhost toggle, preview mode, and diagnostics |
 | `_locales/` | Chrome extension localization files (`en`, `zh_CN`, `zh_TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt_BR`, `ru`) |
 | `icons/` | Extension icons (`16x16`, `32x32`, `48x48`, `128x128`) |
 | `AGENTS.md` | Contributor & AI agent engineering guidelines, Browser Support Policy, CSP rules, and verification commands |
-| `PLAN.md` | v2.6.0–v2.7.0 architectural breakdown and open-source roadmap |
+| `PLAN.md` | v2.6.0–v2.9.0 architectural breakdown and open-source roadmap |
 | `CHANGELOG.md` | Version history following Keep a Changelog format |
 | `PRIVACY.md` | Privacy policy & `chrome.storage.sync` / permission disclosures |
 | `CHROMEWEBSTORE.md` | Chrome Web Store & Edge Add-ons listing copy, permission justifications, and submission checklist |
 | `LICENSE` | MIT License |
-| `scripts/verify.mjs` | Zero-dependency Node verification suite (syntax, MV3 scope, `_locales` & 129-key i18n parity, PNG integrity, leak scan) |
+| `scripts/verify.mjs` | Zero-dependency Node verification suite (syntax, MV3 & optional host scope, `_locales` & 161-key i18n parity, PNG integrity, leak scan) |
 | `scripts/package.sh` | Runs verification and builds a clean runtime-only `.zip` archive in `dist/` |
 | `.github/workflows/ci.yml` | GitHub Actions CI workflow running verification, packaging, and archive artifact upload |
 | `.gitignore` | Git ignore rules for OS metadata, build artifacts (`dist/`, `*.zip`, `*.crx`, `*.pem`), dependencies, and editor files |
@@ -132,7 +140,7 @@ Requires **Node.js 20+** (no `npm install` or external packages needed):
 # Run syntax, manifest, 10-locale i18n, CSP/security, PNG, and leak checks
 node scripts/verify.mjs
 
-# Run all checks and build dist/antigravity-tab-status-v2.8.0.zip
+# Run all checks and build dist/antigravity-tab-status-v2.9.0.zip
 bash scripts/package.sh
 ```
 

@@ -1,32 +1,123 @@
 /**
- * Antigravity Tab Status - Main World Lightweight React Memory & Stream Bridge (v2.7.0)
+ * Antigravity Tab Status - Main World Lightweight React Memory & Stream Bridge (v2.9.0)
  *
- * 优雅、零 UI 点击、高性能的内存直读架构：
- * - 非 Antigravity 页面首行 0.01ms 立即退出
+ * 优雅、零 UI 点击、高性能的内存直读与遥测架构：
+ * - 非 Antigravity 页面首行 0.01ms 立即退出；localhost/127.0.0.1 仅在验证为 Antigravity 宿主后激活
  * - 通过 Manifest V3 原生 `world: "MAIN"` 注入（零内联脚本，100% 兼容严格 CSP）
  * - 支持毫秒级结果缓存与节流（默认 500ms 内重复查询直接 O(1) 返回，几乎零 CPU 占用）
- * - 精准直读 React 18/19 内存树（解决深度截断、Context dependencies 与字典映射问题）：
+ * - 精准直读 React 18/19 内存树与 `.agy-composer-footer` 面板：
  *   1) 沿 `.return` 完整回溯至 HostRoot，识别高层 Context.Provider (`tag === 10`) 与 `dependencies.firstContext` (`useContext`)
  *   2) 识别 TanStack `QueryClient`、Redux/Zustand `Store` 与标准化字典 `{ [convId]: { summary, status, workspaceUris } }`
- *   3) 兼容 Google `)]}'` 前缀与常规 JSON 的 `fetch` / `XHR` / `WebSocket` 被动只读观测
+ *   3) 兼容 Google `)]}'` 前缀与 Connect/SSE/JSON 的 `fetch` / `XHR` / `WebSocket` 被动只读观测与受控同源 Connect-RPC 补充
  */
 
 (() => {
   const isTop = window.top === window.self;
   const AGY_HOST_RE = /^(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
   const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const LOCAL_HOST_RE = /^(?:localhost|127\.0\.0\.1)$/i;
+  const LOCAL_ORIGIN_RE = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+
+  const locHost = window.location.hostname || '';
+  const locProto = window.location.protocol || '';
+  let isOfficialHost = false;
+  let isLocalCandidate = false;
 
   if (isTop) {
-    if (!AGY_HOST_RE.test(window.location.hostname || '')) return;
+    if ((!locProto || locProto === 'https:') && AGY_HOST_RE.test(locHost)) {
+      isOfficialHost = true;
+    } else if (locProto === 'http:' && LOCAL_HOST_RE.test(locHost)) {
+      isLocalCandidate = true;
+    }
   } else {
     const origins = window.location.ancestorOrigins;
     if (!origins || origins.length === 0) return;
     const topOrigin = origins[origins.length - 1] || '';
-    if (!AGY_ORIGIN_RE.test(topOrigin)) return;
+    if (AGY_ORIGIN_RE.test(topOrigin)) {
+      isOfficialHost = true;
+    } else if (LOCAL_ORIGIN_RE.test(topOrigin)) {
+      isLocalCandidate = true;
+    }
   }
 
+  if (!isOfficialHost && !isLocalCandidate) return;
   if (window.__AGY_MAIN_BRIDGE_V24__) return;
-  window.__AGY_MAIN_BRIDGE_V24__ = true;
+
+  function isVerifiedLocalAntigravity() {
+    try {
+      if (window.__APP_CONFIG__?.csrfToken) return true;
+      if (
+        typeof document !== 'undefined' &&
+        document.querySelector?.(
+          '.agy-composer-footer, button[data-testid="permissions-selector-trigger"]'
+        )
+      ) {
+        return true;
+      }
+      if (!isTop) {
+        try {
+          if (
+            window.top?.__APP_CONFIG__?.csrfToken ||
+            window.top?.document?.documentElement?.hasAttribute?.('data-agy-local-host')
+          ) {
+            return true;
+          }
+        } catch {}
+      }
+    } catch {}
+    return false;
+  }
+
+  if (isLocalCandidate) {
+    if (window.__AGY_LOCAL_PROBE_V29__) return;
+    window.__AGY_LOCAL_PROBE_V29__ = true;
+    let activated = false;
+    let t1500 = null;
+    let t4500 = null;
+
+    const tryLocalActivate = (isFinal = false) => {
+      if (activated || window.__AGY_MAIN_BRIDGE_V24__) return true;
+      if (!isVerifiedLocalAntigravity()) {
+        if (isFinal) {
+          try {
+            delete window.__AGY_LOCAL_PROBE_V29__;
+          } catch {
+            window.__AGY_LOCAL_PROBE_V29__ = false;
+          }
+        }
+        return false;
+      }
+      activated = true;
+      if (t1500) {
+        clearTimeout(t1500);
+        t1500 = null;
+      }
+      if (t4500) {
+        clearTimeout(t4500);
+        t4500 = null;
+      }
+      try {
+        document.documentElement?.setAttribute('data-agy-local-host', '1');
+      } catch {}
+      initBridge();
+      return true;
+    };
+
+    if (!tryLocalActivate(false)) {
+      if (typeof document !== 'undefined' && document.readyState === 'loading') {
+        document.addEventListener?.('DOMContentLoaded', () => tryLocalActivate(false), { once: true });
+      }
+      t1500 = setTimeout(() => tryLocalActivate(false), 1500);
+      t4500 = setTimeout(() => tryLocalActivate(true), 4500);
+    }
+    return;
+  }
+
+  initBridge();
+
+  function initBridge() {
+    if (window.__AGY_MAIN_BRIDGE_V24__) return;
+    window.__AGY_MAIN_BRIDGE_V24__ = true;
 
   const NAV_SKIP_RE =
     /^(antigravity|projects|conversation\s*history|history|settings|preferences|customizations|plugins|new\s*conversation|new\s*chat|idle|running|waiting|completed|pending|active|archived|pinned)$/i;
@@ -682,13 +773,16 @@
     return hasConvField;
   }
 
-  function matchKnownProjectFromUris(obj, knownLowerNames, lowerToCanonical) {
-    if (!knownLowerNames || knownLowerNames.size === 0) return '';
+  function collectWorkspaceBasenames(obj) {
+    if (!obj || typeof obj !== 'object') return [];
     const uriCandidates = [];
     if (typeof obj.workspaceUri === 'string') uriCandidates.push(obj.workspaceUri);
     if (typeof obj.projectPath === 'string') uriCandidates.push(obj.projectPath);
     if (typeof obj.rootUri === 'string') uriCandidates.push(obj.rootUri);
     if (typeof obj.repository?.name === 'string') uriCandidates.push(obj.repository.name);
+    if (typeof obj.repository?.computedName === 'string') {
+      uriCandidates.push(obj.repository.computedName);
+    }
     if (Array.isArray(obj.workspaceUris)) {
       for (const u of obj.workspaceUris) {
         if (typeof u === 'string') uriCandidates.push(u);
@@ -698,14 +792,34 @@
       for (const w of obj.workspaces) {
         if (typeof w === 'string') uriCandidates.push(w);
         else if (w && typeof w === 'object') {
-          const u = w.workspaceFolderAbsoluteUri ?? w.uri ?? w.rootUri ?? w.name ?? w.path;
+          const u =
+            w.workspaceFolderAbsoluteUri ??
+            w.uri ??
+            w.rootUri ??
+            w.name ??
+            w.path ??
+            w.repository?.computedName ??
+            w.repository?.name;
           if (typeof u === 'string') uriCandidates.push(u);
         }
       }
     }
-
+    const bases = [];
+    const seen = new Set();
     for (const raw of uriCandidates) {
-      const base = extractBasenameFromUri(raw).toLowerCase();
+      const base = extractBasenameFromUri(raw);
+      if (base && !seen.has(base.toLowerCase())) {
+        seen.add(base.toLowerCase());
+        bases.push(base);
+      }
+    }
+    return bases;
+  }
+
+  function matchKnownProjectFromUris(obj, knownLowerNames, lowerToCanonical) {
+    if (!knownLowerNames || knownLowerNames.size === 0) return '';
+    for (const raw of collectWorkspaceBasenames(obj)) {
+      const base = raw.toLowerCase();
       if (base && knownLowerNames.has(base)) {
         return lowerToCanonical ? lowerToCanonical.get(base) || base : base;
       }
@@ -762,8 +876,15 @@
         ''
     ).trim();
 
+    const workspaceNames = collectWorkspaceBasenames(obj);
     if (!projName && knownLowerNames) {
-      projName = matchKnownProjectFromUris(obj, knownLowerNames, lowerToCanonical);
+      for (const base of workspaceNames) {
+        const low = base.toLowerCase();
+        if (knownLowerNames.has(low)) {
+          projName = lowerToCanonical ? lowerToCanonical.get(low) || low : low;
+          break;
+        }
+      }
     }
 
     const {
@@ -789,6 +910,7 @@
       title: titleStr,
       projectId: projId,
       projectName: projName,
+      workspaceNames,
       state,
       reasonCode,
       reasonVars,
@@ -932,6 +1054,10 @@
       title: next.title || prev.title,
       projectId: next.projectId || prev.projectId,
       projectName: next.projectName || prev.projectName,
+      workspaceNames:
+        Array.isArray(next.workspaceNames) && next.workspaceNames.length > 0
+          ? next.workspaceNames
+          : prev.workspaceNames || [],
       state: resultState,
       reasonCode: takeNextState ? next.reasonCode : prev.reasonCode,
       reasonVars: takeNextState ? next.reasonVars : prev.reasonVars,
@@ -1139,6 +1265,1141 @@
     walk(rootVal, 0, contextProjId, contextProjName, '');
   }
 
+  // ============================================================================
+  // 1. 遥测常量、时间与配额归一化、Step 汇总与上下文/压缩/流式测速引擎 (v2.9.0)
+  // ============================================================================
+  const MAX_TELEMETRY_CONVS = 40;
+  const MAX_STEPS_PER_CONV = 240;
+  const MAX_MODELS_CACHE = 80;
+  const LS_ENDPOINT_MARKER = '/exa.language_server_pb.LanguageServerService/';
+  const URL_CONV_ID_RE =
+    /(?:jetski_remote_agents_3p\/|conversations?\/|c\/|cascadeId=)([a-zA-Z0-9_-]{8,})/i;
+  const SHADOW_MODEL_RE =
+    /(?:^|[^A-Z0-9])(M50|M21)(?:$|[^A-Z0-9])|FLASH[_-]?LITE|IMAGE|BANANA/i;
+  const SENTINEL_CUTOFF_MS = Date.UTC(2000, 0, 1);
+
+  const RPC_USER_STATUS_TTL_MS = 30000;
+  const RPC_TRAJECTORIES_TTL_MS = 4000;
+  const RPC_STEPS_RUNNING_TTL_MS = 3000;
+  const RPC_STEPS_IDLE_TTL_MS = 15000;
+  const RPC_TIMEOUT_MS = 5000;
+
+  const KNOWN_QUOTA_POOLS = {
+    MODEL_PLACEHOLDER_M18: 'gemini',
+    MODEL_PLACEHOLDER_M36: 'gemini',
+    MODEL_PLACEHOLDER_M37: 'gemini',
+    MODEL_PLACEHOLDER_M47: 'gemini',
+    MODEL_PLACEHOLDER_M26: 'premium',
+    MODEL_PLACEHOLDER_M35: 'premium',
+    MODEL_PLACEHOLDER_M12: 'premium'
+  };
+
+  const CONTEXT_LIMIT_KEYS = [
+    'maxContextTokens',
+    'contextLimit',
+    'contextWindow',
+    'contextWindowSize',
+    'maxContextLength',
+    'maxContextWindow',
+    'compactionThresholdTokens',
+    'compactionThreshold',
+    'compactionLimit',
+    'compactionTokenLimit',
+    'autoCompactThreshold',
+    'autoCompactLimit',
+    'maxInputTokens',
+    'inputTokenLimit',
+    'maxPromptTokens',
+    'promptTokenLimit',
+    'tokenLimit'
+  ];
+
+  const STEP_META_SKIP_KEYS = new Set([
+    'modelUsage',
+    'usage',
+    'tokenUsage',
+    'type',
+    'role',
+    'status',
+    'stepStatus',
+    'state',
+    'createdAt',
+    'finishedGeneratingAt',
+    'timestamp',
+    'updatedAt',
+    'id',
+    'stepId',
+    'cascadeId',
+    'conversationId',
+    'trajectoryId',
+    'generatorModel',
+    'requestedModel',
+    'model',
+    'modelId',
+    'uri',
+    'path',
+    'href',
+    'url',
+    'icon',
+    'iconName'
+  ]);
+
+  const netModelsById = new Map();
+  const convTelemetryById = new Map();
+  const composerFallbackIds = new WeakMap();
+  let composerFallbackSeq = 0;
+  let lastKnownActiveConvId = '';
+  let lastResolvedActiveConvId = '';
+  let sawLanguageServerEndpoint = false;
+  let capturedCsrfToken = '';
+  let nativeFetchRef = null;
+
+  const rpcState = {
+    userStatusAt: 0,
+    userStatusInFlight: false,
+    trajectoriesAt: 0,
+    trajectoriesInFlight: false,
+    stepsAtByConv: new Map(),
+    stepsInFlight: new Set(),
+    hasSuccess: false
+  };
+
+  function isShadowModel(modelId, label = '') {
+    const combined = `${String(modelId || '')} ${String(label || '')}`.trim();
+    return Boolean(combined && SHADOW_MODEL_RE.test(combined));
+  }
+
+  function classifyQuotaPool(modelId, label = '') {
+    const upper = `${String(modelId || '')} ${String(label || '')}`.toUpperCase();
+    if (/CLAUDE|OPUS|SONNET|GPT|OSS/.test(upper)) return 'premium';
+    if (/GEMINI|ARGON|FLASH|HYDROGEN/.test(upper)) return 'gemini';
+    const idKey = String(modelId || '').trim().toUpperCase();
+    if (idKey && KNOWN_QUOTA_POOLS[idKey]) return KNOWN_QUOTA_POOLS[idKey];
+    return null;
+  }
+
+  function toNonNegInt(val) {
+    if (typeof val === 'number') return Number.isFinite(val) && val > 0 ? Math.round(val) : 0;
+    if (typeof val === 'string' && /^\d+(?:\.\d+)?$/.test(val.trim())) {
+      const n = Number(val.trim());
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+    }
+    if (typeof val === 'bigint' && val > 0n) return Number(val);
+    return 0;
+  }
+
+  function parseResetTimeMs(raw, depth = 0) {
+    if (
+      raw === null ||
+      raw === undefined ||
+      raw === '' ||
+      typeof raw === 'boolean' ||
+      depth > 3
+    ) {
+      return null;
+    }
+    let ms = NaN;
+    if (raw instanceof Date) {
+      ms = raw.getTime();
+    } else if (typeof raw === 'bigint') {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) {
+        if (n > 1e16) ms = Math.floor(n / 1e6);
+        else if (n > 1e14) ms = Math.floor(n / 1e3);
+        else if (n > 1e11) ms = n;
+        else ms = n * 1000;
+      }
+    } else if (typeof raw === 'number') {
+      if (Number.isFinite(raw) && raw > 0) {
+        if (raw > 1e16) ms = Math.floor(raw / 1e6);
+        else if (raw > 1e14) ms = Math.floor(raw / 1e3);
+        else if (raw > 1e11) ms = raw;
+        else ms = raw * 1000;
+      }
+    } else if (typeof raw === 'string') {
+      let s = raw.trim();
+      if (!s) return null;
+      if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+        s = s.slice(1, -1).trim();
+      }
+      if (/^-?\d+(?:\.\d+)?$/.test(s)) {
+        return parseResetTimeMs(Number(s), depth + 1);
+      }
+      // 截断超过 3 位的亚秒小数（Protobuf Timestamp ISO 字符串常见 6-9 位小数）
+      const normIso = s.replace(/(\.\d{3})\d+(?=(?:Z|[+-]\d{2}:?\d{2})?$)/i, '$1');
+      ms = Date.parse(normIso);
+      if (Number.isNaN(ms) && normIso !== s) {
+        ms = Date.parse(s);
+      }
+    } else if (typeof raw === 'object') {
+      try {
+        if (typeof raw.toDate === 'function') {
+          const d = raw.toDate();
+          if (d instanceof Date) return parseResetTimeMs(d, depth + 1);
+        }
+      } catch {}
+      try {
+        if (typeof raw.toJsonString === 'function') {
+          return parseResetTimeMs(raw.toJsonString(), depth + 1);
+        }
+      } catch {}
+      const rawSec = raw.seconds !== undefined ? raw.seconds : raw.sec;
+      if (rawSec !== undefined && rawSec !== null) {
+        const secNum = typeof rawSec === 'bigint' ? Number(rawSec) : Number(rawSec);
+        const rawNanos = raw.nanos !== undefined ? raw.nanos : raw.nano;
+        const nanosNum =
+          rawNanos !== undefined && rawNanos !== null
+            ? typeof rawNanos === 'bigint'
+              ? Number(rawNanos)
+              : Number(rawNanos)
+            : 0;
+        if (Number.isFinite(secNum) && secNum > 0) {
+          ms = secNum * 1000 + (Number.isFinite(nanosNum) ? Math.floor(nanosNum / 1e6) : 0);
+        }
+      }
+    }
+    if (!Number.isFinite(ms) || ms <= SENTINEL_CUTOFF_MS) return null;
+    return Math.round(ms);
+  }
+
+  function normalizeQuotaInfo(rawQuota, nowMs = Date.now()) {
+    if (!rawQuota || typeof rawQuota !== 'object') return null;
+    const resetRaw =
+      rawQuota.resetTime ??
+      rawQuota.reset_time ??
+      rawQuota.resetTimestamp ??
+      rawQuota.resetAt ??
+      rawQuota.resetTimeMs;
+    const resetTimeMs = parseResetTimeMs(resetRaw);
+
+    const rawFrac =
+      rawQuota.remainingFraction !== undefined
+        ? rawQuota.remainingFraction
+        : rawQuota.remaining_fraction;
+    let remainingFraction = null;
+    if (typeof rawFrac === 'number' && Number.isFinite(rawFrac)) {
+      remainingFraction = Math.max(0, Math.min(1, rawFrac));
+    } else if (typeof rawFrac === 'string' && rawFrac.trim() !== '') {
+      const parsedFrac = Number(rawFrac);
+      if (Number.isFinite(parsedFrac)) {
+        remainingFraction = Math.max(0, Math.min(1, parsedFrac));
+      }
+    } else if (rawFrac === undefined && resetTimeMs !== null && resetTimeMs > nowMs) {
+      // Proto3 默认值 0.0 会被省略；存在未来 resetTime 时还原为 0
+      remainingFraction = 0;
+    }
+
+    if (remainingFraction === null && resetTimeMs === null) return null;
+    return { remainingFraction, resetTimeMs };
+  }
+
+  function extractContextLimitFromConfig(cfg) {
+    if (!cfg || typeof cfg !== 'object') return 0;
+    const candidates = [
+      cfg,
+      cfg.compactionConfig,
+      cfg.contextConfig,
+      cfg.limits,
+      cfg.modelMetadata,
+      cfg.metadata
+    ];
+    for (const obj of candidates) {
+      if (!obj || typeof obj !== 'object') continue;
+      for (const key of CONTEXT_LIMIT_KEYS) {
+        const raw = obj[key];
+        const n =
+          typeof raw === 'number'
+            ? raw
+            : typeof raw === 'string' && /^\d+$/.test(raw)
+              ? Number(raw)
+              : NaN;
+        if (Number.isFinite(n) && n > 10000 && n <= 100_000_000) {
+          return Math.round(n);
+        }
+      }
+      try {
+        for (const k of Object.keys(obj)) {
+          if (
+            /(?:context|compaction).*(?:limit|window|tokens?|threshold|size|length)/i.test(k) &&
+            !/output|completion|cache/i.test(k)
+          ) {
+            const raw = obj[k];
+            const n =
+              typeof raw === 'number'
+                ? raw
+                : typeof raw === 'string' && /^\d+$/.test(raw)
+                  ? Number(raw)
+                  : NaN;
+            if (Number.isFinite(n) && n > 10000 && n <= 100_000_000) {
+              return Math.round(n);
+            }
+          }
+        }
+      } catch {}
+    }
+    return 0;
+  }
+
+  function extractModelConfigInfo(cfg) {
+    if (!cfg || typeof cfg !== 'object') return null;
+    const modelId = String(
+      cfg.modelOrAlias?.model ??
+        cfg.modelOrAlias?.alias ??
+        cfg.modelId ??
+        (typeof cfg.model === 'string' ? cfg.model : '') ??
+        cfg.modelName ??
+        cfg.alias ??
+        cfg.id ??
+        ''
+    ).trim();
+    const label = String(
+      cfg.label ?? cfg.displayName ?? cfg.name ?? cfg.modelLabel ?? modelId
+    ).trim();
+    const resolvedId = modelId || label;
+    if (!resolvedId || isShadowModel(resolvedId, label)) return null;
+    const contextLimit = extractContextLimitFromConfig(cfg);
+    const rawQuota = cfg.quotaInfo ?? cfg.quota;
+    const quota = normalizeQuotaInfo(rawQuota);
+    const pool = classifyQuotaPool(resolvedId, label);
+    return {
+      modelId: resolvedId,
+      label: label || resolvedId,
+      pool,
+      contextLimit: contextLimit > 10000 ? contextLimit : 0,
+      hasQuotaInfo: Boolean(quota),
+      remainingFraction: quota ? quota.remainingFraction : null,
+      resetTimeMs: quota ? quota.resetTimeMs : null
+    };
+  }
+
+  function upsertModelConfig(info) {
+    if (!info || !info.modelId || isShadowModel(info.modelId, info.label)) return false;
+    const prev = netModelsById.get(info.modelId);
+    const next = {
+      modelId: info.modelId,
+      label:
+        info.label && info.label !== info.modelId
+          ? info.label
+          : prev?.label || info.label || info.modelId,
+      pool: info.pool || prev?.pool || classifyQuotaPool(info.modelId, info.label),
+      contextLimit:
+        info.contextLimit > 10000
+          ? info.contextLimit
+          : prev?.contextLimit > 10000
+            ? prev.contextLimit
+            : 0,
+      remainingFraction: info.hasQuotaInfo
+        ? info.remainingFraction
+        : prev?.remainingFraction ?? null,
+      resetTimeMs: info.hasQuotaInfo ? info.resetTimeMs : prev?.resetTimeMs ?? null
+    };
+    const changed =
+      !prev ||
+      prev.label !== next.label ||
+      prev.pool !== next.pool ||
+      prev.contextLimit !== next.contextLimit ||
+      prev.remainingFraction !== next.remainingFraction ||
+      prev.resetTimeMs !== next.resetTimeMs;
+    netModelsById.set(info.modelId, next);
+    pruneMapToLimit(netModelsById, MAX_MODELS_CACHE);
+    return changed;
+  }
+
+  function findModelMeta(modelId, modelLabel) {
+    if (modelId && netModelsById.has(modelId)) {
+      return netModelsById.get(modelId);
+    }
+    const lowId = String(modelId || '').trim().toLowerCase();
+    const lowLabel = String(modelLabel || '').trim().toLowerCase();
+    for (const m of netModelsById.values()) {
+      if (lowId && m.modelId.toLowerCase() === lowId) return m;
+      if (lowLabel && m.label.toLowerCase() === lowLabel) return m;
+    }
+    return null;
+  }
+
+  function getDynamicContextLimit(modelId, modelLabel) {
+    const meta = findModelMeta(modelId, modelLabel);
+    if (meta && meta.contextLimit > 10000) return meta.contextLimit;
+    const combined = `${String(modelId || '')} ${String(modelLabel || '')}`.toUpperCase();
+    if (/GPT[_-]?OSS|120B/.test(combined)) return 80000;
+    return 256000;
+  }
+
+  function estimateTokensFromText(str) {
+    if (typeof str !== 'string' || !str) return 0;
+    let ascii = 0;
+    let nonAscii = 0;
+    const sampleLen = Math.min(str.length, 200000);
+    for (let i = 0; i < sampleLen; i++) {
+      if (str.charCodeAt(i) <= 0x7f) ascii++;
+      else nonAscii++;
+    }
+    const scale = str.length > sampleLen ? str.length / sampleLen : 1;
+    return Math.ceil((ascii / 4 + nonAscii / 1.5) * scale);
+  }
+
+  function estimateStepTokens(step) {
+    if (!step || typeof step !== 'object') return 0;
+    if (typeof step.estTokens === 'number' && Number.isFinite(step.estTokens)) {
+      return Math.max(0, Math.round(step.estTokens));
+    }
+    let total = 0;
+    let nodes = 0;
+    const seen = new WeakSet();
+
+    function walkText(val, depth) {
+      if (nodes >= 80 || depth > 5 || val === null || val === undefined) return;
+      if (typeof val === 'string') {
+        if (val.length > 0) total += estimateTokensFromText(val);
+        return;
+      }
+      if (typeof val !== 'object') return;
+      try {
+        if ((typeof Node !== 'undefined' && val instanceof Node) || val.$$typeof) return;
+      } catch {
+        return;
+      }
+      if (seen.has(val)) return;
+      seen.add(val);
+      nodes++;
+      if (Array.isArray(val)) {
+        for (let i = 0; i < val.length && i < 30; i++) {
+          walkText(val[i], depth + 1);
+        }
+        return;
+      }
+      let keys;
+      try {
+        keys = Object.keys(val);
+      } catch {
+        return;
+      }
+      for (let i = 0; i < keys.length && i < 25; i++) {
+        const k = keys[i];
+        if (k.startsWith('_') || STEP_META_SKIP_KEYS.has(k)) continue;
+        try {
+          walkText(val[k], depth + 1);
+        } catch {}
+      }
+    }
+
+    walkText(step, 0);
+    return total;
+  }
+
+  function extractStepModelUsage(step) {
+    if (!step || typeof step !== 'object') return null;
+    const rawMu =
+      step.metadata?.modelUsage ??
+      step.modelUsage ??
+      step.plannerResponse?.modelUsage ??
+      step.metadata?.generatorMetadata?.modelUsage ??
+      step.usage ??
+      step.tokenUsage;
+    const fallbackModel = String(
+      step.metadata?.generatorModel ??
+        step.metadata?.requestedModel?.model ??
+        step.metadata?.model ??
+        (typeof step.model === 'string' ? step.model : '') ??
+        ''
+    ).trim();
+    if (!rawMu || typeof rawMu !== 'object') {
+      return fallbackModel
+        ? {
+            model: fallbackModel,
+            inputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            outputTokens: 0
+          }
+        : null;
+    }
+    const model = String(rawMu.model ?? rawMu.modelId ?? rawMu.modelName ?? fallbackModel).trim();
+    const inputTokens = toNonNegInt(
+      rawMu.inputTokens ?? rawMu.input_tokens ?? rawMu.promptTokens ?? rawMu.prompt_tokens
+    );
+    const cacheReadTokens = toNonNegInt(
+      rawMu.cacheReadTokens ??
+        rawMu.cache_read_tokens ??
+        rawMu.cachedContentTokenCount ??
+        rawMu.cacheReadInputTokens ??
+        rawMu.cache_read_input_tokens
+    );
+    const cacheCreationTokens = toNonNegInt(
+      rawMu.cacheCreationTokens ??
+        rawMu.cache_creation_tokens ??
+        rawMu.cacheCreationInputTokens ??
+        rawMu.cache_creation_input_tokens
+    );
+    const outputTokens = toNonNegInt(
+      rawMu.outputTokens ??
+        rawMu.output_tokens ??
+        rawMu.candidatesTokenCount ??
+        rawMu.completionTokens ??
+        rawMu.completion_tokens
+    );
+    if (!model && inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens === 0) {
+      return null;
+    }
+    return {
+      model,
+      inputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      outputTokens
+    };
+  }
+
+  function summarizeStep(step) {
+    if (!step || typeof step !== 'object') {
+      return {
+        modelUsage: null,
+        type: '',
+        role: '',
+        createdAt: null,
+        finishedGeneratingAt: null,
+        status: '',
+        estTokens: 0
+      };
+    }
+    const modelUsage = extractStepModelUsage(step);
+    const type = typeof step.type === 'string' ? step.type.slice(0, 64) : '';
+    const role = typeof step.role === 'string' ? step.role.slice(0, 32) : '';
+    const status = String(step.status ?? step.stepStatus ?? step.state ?? '').slice(0, 48);
+    const createdAt = parseResetTimeMs(
+      step.metadata?.createdAt ?? step.createdAt ?? step.timestamp
+    );
+    const finishedGeneratingAt = parseResetTimeMs(
+      step.metadata?.finishedGeneratingAt ?? step.finishedGeneratingAt
+    );
+    const estTokens = estimateStepTokens(step);
+    return {
+      modelUsage,
+      type,
+      role,
+      createdAt,
+      finishedGeneratingAt,
+      status,
+      estTokens
+    };
+  }
+
+  function getOrCreateConvTelemetry(convId) {
+    let entry = convTelemetryById.get(convId);
+    if (!entry) {
+      entry = {
+        convId,
+        title: '',
+        modelId: '',
+        modelLabel: '',
+        isRunning: false,
+        totalStepCount: 0,
+        stepOffsetBase: 0,
+        steps: [],
+        hasExactSourceSteps: false,
+        lastStreamTs: 0,
+        lastStreamTokens: 0,
+        tokPerSec: 0,
+        speedSamples: [],
+        avgTokPerSec: 0,
+        updatedAt: 0
+      };
+      convTelemetryById.set(convId, entry);
+      pruneMapToLimit(convTelemetryById, MAX_TELEMETRY_CONVS);
+    }
+    return entry;
+  }
+
+  function analyzeConversationSteps(convEntry, composerInfo = null) {
+    const convId = String(convEntry?.convId || '');
+    const steps = Array.isArray(convEntry?.steps) ? convEntry.steps : [];
+
+    let hasExactSnapshot = false;
+    let baseTokens = 0;
+    let inputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
+    let outputTokens = 0;
+    let estimatedDelta = 0;
+    let latestStepModelId = '';
+
+    let prevCacheInclusiveInput = 0;
+    let prevContextUsed = 0;
+    let prevSnapshotModel = '';
+    let compressionDetected = false;
+    let compressionBefore = 0;
+    let compressionAfter = 0;
+    let compressionDrop = 0;
+
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      if (!s || typeof s !== 'object') continue;
+      const mu = s.modelUsage;
+      const sModel = String(mu?.model || '').trim();
+      // 过滤影子/子代理/生图模型，防止覆盖主模型 ID、上下文上限或快照
+      if (sModel && isShadowModel(sModel)) continue;
+
+      const inTok = toNonNegInt(mu?.inputTokens);
+      const cacheRead = toNonNegInt(mu?.cacheReadTokens);
+      const cacheCreate = toNonNegInt(mu?.cacheCreationTokens);
+      const outTok = toNonNegInt(mu?.outputTokens);
+      const totalMu = inTok + cacheRead + cacheCreate + outTok;
+
+      if (mu && totalMu > 0) {
+        const cacheInclusiveInput = inTok + cacheRead + cacheCreate;
+        const hitInputDrop =
+          prevCacheInclusiveInput > 0 && prevCacheInclusiveInput - cacheInclusiveInput > 5000;
+        const hitSameModelDrop =
+          Boolean(prevSnapshotModel && sModel && prevSnapshotModel === sModel) &&
+          prevContextUsed > 0 &&
+          prevContextUsed - totalMu > 5000;
+
+        if (hitInputDrop || hitSameModelDrop) {
+          compressionDetected = true;
+          if (prevContextUsed > totalMu) {
+            compressionBefore = prevContextUsed;
+            compressionAfter = totalMu;
+          } else {
+            compressionBefore = prevCacheInclusiveInput;
+            compressionAfter = cacheInclusiveInput;
+          }
+          const rawDrop = Math.max(0, compressionBefore - compressionAfter);
+          compressionDrop =
+            compressionBefore > 0 ? Math.max(1, Math.round((rawDrop / compressionBefore) * 100)) : 0;
+        }
+
+        prevCacheInclusiveInput = cacheInclusiveInput;
+        prevContextUsed = totalMu;
+        if (sModel) prevSnapshotModel = sModel;
+
+        hasExactSnapshot = true;
+        baseTokens = totalMu;
+        inputTokens = inTok;
+        cacheReadTokens = cacheRead;
+        cacheCreationTokens = cacheCreate;
+        outputTokens = outTok;
+        estimatedDelta = 0;
+        if (sModel) latestStepModelId = sModel;
+      } else {
+        if (sModel && !latestStepModelId) latestStepModelId = sModel;
+        estimatedDelta += toNonNegInt(s.estTokens);
+      }
+    }
+
+    const composerOwned = Boolean(composerInfo && composerInfo.convId === convId);
+    const primaryModelId =
+      (composerOwned && composerInfo.modelId && !isShadowModel(composerInfo.modelId)
+        ? composerInfo.modelId
+        : '') ||
+      latestStepModelId ||
+      (convEntry?.modelId && !isShadowModel(convEntry.modelId) ? convEntry.modelId : '') ||
+      (composerInfo?.modelId && !isShadowModel(composerInfo.modelId) ? composerInfo.modelId : '') ||
+      '';
+
+    const modelMeta = findModelMeta(
+      primaryModelId,
+      (composerOwned ? composerInfo.modelLabel : '') || convEntry?.modelLabel || ''
+    );
+    const modelLabel =
+      (composerOwned && composerInfo.modelLabel) ||
+      modelMeta?.label ||
+      convEntry?.modelLabel ||
+      primaryModelId ||
+      '';
+    const contextLimit = getDynamicContextLimit(primaryModelId, modelLabel);
+
+    let precision = 'estimated';
+    let contextUsed = estimatedDelta;
+    let cacheHitRate = 0;
+
+    if (hasExactSnapshot) {
+      precision = 'exact';
+      contextUsed = baseTokens + estimatedDelta;
+      const totalInSide = inputTokens + cacheReadTokens + cacheCreationTokens;
+      cacheHitRate = totalInSide > 0 ? Math.round((cacheReadTokens / totalInSide) * 100) : 0;
+    } else {
+      inputTokens = 0;
+      cacheReadTokens = 0;
+      cacheCreationTokens = 0;
+      outputTokens = 0;
+      cacheHitRate = 0;
+    }
+
+    const usagePercent =
+      contextLimit > 0 ? Math.min(100, Math.round((contextUsed / contextLimit) * 100)) : 0;
+    const remainPercent = Math.max(0, 100 - usagePercent);
+
+    const now = Date.now();
+    const tokPerSec =
+      !convEntry?.isRunning && convEntry?.lastStreamTs && now - convEntry.lastStreamTs > 15000
+        ? 0
+        : convEntry?.tokPerSec || 0;
+    const avgTokPerSec = convEntry?.avgTokPerSec || 0;
+
+    const remainingFraction =
+      composerOwned && composerInfo.remainingFraction !== null
+        ? composerInfo.remainingFraction
+        : modelMeta?.remainingFraction ?? null;
+    const resetTimeMs =
+      composerOwned && composerInfo.resetTimeMs !== null
+        ? composerInfo.resetTimeMs
+        : modelMeta?.resetTimeMs ?? null;
+
+    const stepCount = Math.max(
+      convEntry?.totalStepCount || 0,
+      (convEntry?.stepOffsetBase || 0) + steps.length
+    );
+
+    return {
+      convId,
+      modelId: primaryModelId,
+      modelLabel,
+      contextUsed,
+      contextLimit,
+      usagePercent,
+      remainPercent,
+      inputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      outputTokens,
+      estimatedDelta,
+      cacheHitRate,
+      tokPerSec,
+      avgTokPerSec,
+      compressionDetected,
+      compressionBefore,
+      compressionAfter,
+      compressionDrop,
+      precision,
+      remainingFraction,
+      resetTimeMs,
+      stepCount
+    };
+  }
+
+  function updateStreamSpeed(entry, isRunningNow) {
+    if (!entry) return;
+    if (!isRunningNow) return;
+    const analysis = analyzeConversationSteps(entry, null);
+    const curTokens = analysis.contextUsed;
+    const now = Date.now();
+    if (!entry.lastStreamTs || curTokens < entry.lastStreamTokens) {
+      entry.lastStreamTs = now;
+      entry.lastStreamTokens = curTokens;
+      return;
+    }
+    if (curTokens > entry.lastStreamTokens) {
+      const dt = (now - entry.lastStreamTs) / 1000;
+      if (dt >= 0.25 && dt <= 12) {
+        const spd = (curTokens - entry.lastStreamTokens) / dt;
+        if (spd > 0 && spd < 500) {
+          const rounded = spd >= 10 ? Math.round(spd) : Math.round(spd * 10) / 10;
+          entry.tokPerSec = rounded;
+          entry.speedSamples.push(spd);
+          if (entry.speedSamples.length > 20) entry.speedSamples.shift();
+          const sum = entry.speedSamples.reduce((a, b) => a + b, 0);
+          const avg = sum / entry.speedSamples.length;
+          entry.avgTokPerSec = avg >= 10 ? Math.round(avg) : Math.round(avg * 10) / 10;
+        }
+        entry.lastStreamTs = now;
+        entry.lastStreamTokens = curTokens;
+      } else if (dt > 12) {
+        entry.lastStreamTs = now;
+        entry.lastStreamTokens = curTokens;
+      }
+    }
+  }
+
+  function isStepStatusRunning(step) {
+    if (!step || typeof step !== 'object') return false;
+    const st = String(step.status ?? step.stepStatus ?? step.state ?? '').toUpperCase();
+    return /RUNNING|WORKING|IN_PROGRESS|GENERATING|STREAMING|EXECUTING/.test(st);
+  }
+
+  function upsertConvSteps(
+    convId,
+    rawSteps,
+    { stepOffset = 0, isIncremental = false, isStepsSource = true, source = 'network', isRunningHint = false } = {}
+  ) {
+    if (!convId || !Array.isArray(rawSteps) || rawSteps.length === 0) return false;
+    const entry = getOrCreateConvTelemetry(convId);
+    const summarized = rawSteps.map(summarizeStep);
+    const hasUsageInNew = summarized.some(
+      (s) =>
+        s.modelUsage &&
+        !isShadowModel(s.modelUsage.model) &&
+        s.modelUsage.inputTokens +
+          s.modelUsage.cacheReadTokens +
+          s.modelUsage.cacheCreationTokens +
+          s.modelUsage.outputTokens >
+          0
+    );
+
+    // 避免用无 modelUsage 的 Fiber UI messages 降级已获取的精确 RPC steps
+    if (source === 'fiber' && !isStepsSource && entry.hasExactSourceSteps && !hasUsageInNew) {
+      return false;
+    }
+
+    let effOffset = Math.max(0, toNonNegInt(stepOffset));
+    if (
+      isIncremental &&
+      effOffset > 0 &&
+      entry.totalStepCount > 0 &&
+      summarized.length >= entry.totalStepCount &&
+      summarized.length > entry.totalStepCount - effOffset + 5
+    ) {
+      effOffset = 0;
+    }
+
+    if (entry.steps.length === 0 || (!isIncremental && effOffset === 0)) {
+      const prevSteps = entry.steps;
+      const prevBase = entry.stepOffsetBase;
+      const merged = summarized.map((s, idx) => {
+        if (
+          source === 'fiber' &&
+          !s.modelUsage &&
+          prevBase === 0 &&
+          prevSteps[idx]?.modelUsage &&
+          prevSteps[idx].type === s.type &&
+          prevSteps[idx].role === s.role
+        ) {
+          return { ...s, modelUsage: prevSteps[idx].modelUsage };
+        }
+        return s;
+      });
+      entry.stepOffsetBase = effOffset;
+      entry.steps = merged;
+    } else if (effOffset < entry.stepOffsetBase) {
+      entry.stepOffsetBase = effOffset;
+      entry.steps = summarized;
+    } else {
+      const relStart = effOffset - entry.stepOffsetBase;
+      for (let i = 0; i < summarized.length; i++) {
+        const targetIdx = relStart + i;
+        const prev = entry.steps[targetIdx];
+        const next = summarized[i];
+        if (
+          source === 'fiber' &&
+          !next.modelUsage &&
+          prev?.modelUsage &&
+          prev.type === next.type &&
+          prev.role === next.role
+        ) {
+          entry.steps[targetIdx] = { ...next, modelUsage: prev.modelUsage };
+        } else {
+          entry.steps[targetIdx] = next;
+        }
+      }
+      if (entry.totalStepCount === 0 || effOffset + summarized.length >= entry.totalStepCount) {
+        entry.steps.length = relStart + summarized.length;
+      }
+    }
+
+    if (entry.steps.length > MAX_STEPS_PER_CONV) {
+      const drop = entry.steps.length - MAX_STEPS_PER_CONV;
+      entry.steps.splice(0, drop);
+      entry.stepOffsetBase += drop;
+    }
+
+    if (hasUsageInNew) {
+      entry.hasExactSourceSteps = true;
+    }
+    entry.totalStepCount = Math.max(entry.totalStepCount, entry.stepOffsetBase + entry.steps.length);
+    entry.updatedAt = Date.now();
+
+    const lastStep = rawSteps[rawSteps.length - 1];
+    const netConv = netConvsById.get(`id::${convId}`);
+    const runningNow = Boolean(
+      isRunningHint ||
+        entry.isRunning ||
+        netConv?.state === 'running' ||
+        isStepStatusRunning(lastStep)
+    );
+    entry.isRunning = runningNow;
+    updateStreamSpeed(entry, runningNow);
+
+    // 刷新 FIFO 顺序（最新活跃保留在队尾）
+    convTelemetryById.delete(convId);
+    convTelemetryById.set(convId, entry);
+    pruneMapToLimit(convTelemetryById, MAX_TELEMETRY_CONVS);
+    return true;
+  }
+
+  function looksLikeStepArray(arr) {
+    if (!Array.isArray(arr) || arr.length === 0) return false;
+    const first = arr[0];
+    if (!first || typeof first !== 'object' || Array.isArray(first)) return false;
+    try {
+      if ((typeof Node !== 'undefined' && first instanceof Node) || first.$$typeof) return false;
+    } catch {
+      return false;
+    }
+    return (
+      'type' in first ||
+      'role' in first ||
+      'status' in first ||
+      'stepStatus' in first ||
+      'metadata' in first ||
+      'modelUsage' in first ||
+      'plannerResponse' in first ||
+      'userInput' in first ||
+      'content' in first ||
+      'text' in first ||
+      'parts' in first ||
+      'runCommand' in first
+    );
+  }
+
+  function extractConvIdFromUrl(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl) return '';
+    const m1 = rawUrl.match(URL_CONV_ID_RE);
+    if (m1) return m1[1];
+    try {
+      const decoded = decodeURIComponent(rawUrl);
+      const m2 = decoded.match(URL_CONV_ID_RE);
+      if (m2) return m2[1];
+    } catch {}
+    return '';
+  }
+
+  function extractDirectConvId(obj, fallbackKey = '') {
+    if (!obj || typeof obj !== 'object') return '';
+    const raw =
+      obj.cascadeId ??
+      obj.conversationId ??
+      obj.trajectoryId ??
+      obj.threadId ??
+      obj.activeCascadeId ??
+      obj.activeConversationId ??
+      obj.currentCascadeId ??
+      obj.currentConversationId ??
+      '';
+    if (typeof raw === 'string' && raw.trim().length >= 4 && raw.trim().length <= 160) {
+      return raw.trim();
+    }
+    if (
+      typeof fallbackKey === 'string' &&
+      fallbackKey.trim().length >= 6 &&
+      fallbackKey.trim().length <= 160 &&
+      !GENERIC_CONTAINER_KEY_RE.test(fallbackKey.trim())
+    ) {
+      return fallbackKey.trim();
+    }
+    return '';
+  }
+
+  function ingestTrajectorySummaries(summariesObj) {
+    if (!summariesObj || typeof summariesObj !== 'object') return false;
+    const pairs =
+      summariesObj instanceof Map
+        ? Array.from(summariesObj.entries())
+        : Object.entries(summariesObj);
+    if (pairs.length === 0) return false;
+
+    // 按更新时间升序插入，确保 FIFO 淘汰最旧对话、保留最新 40 条
+    const sorted = pairs
+      .filter(([id, val]) => typeof id === 'string' && id.trim().length >= 4 && val && typeof val === 'object')
+      .map(([id, val]) => ({
+        id: id.trim(),
+        val,
+        ts:
+          parseResetTimeMs(val.lastModifiedTime ?? val.updatedAt ?? val.lastActivityAt ?? val.createdTime) ||
+          0
+      }))
+      .sort((a, b) => a.ts - b.ts);
+
+    let changed = false;
+    for (const { id, val } of sorted) {
+      const entry = getOrCreateConvTelemetry(id);
+      const norm = normalizeConvState(val);
+      const stepCount = toNonNegInt(val.stepCount ?? val.stepsCount ?? val.numSteps);
+      if (stepCount > entry.totalStepCount) {
+        entry.totalStepCount = stepCount;
+        changed = true;
+      }
+      const nextRunning = norm.state === 'running';
+      if (entry.isRunning !== nextRunning) {
+        entry.isRunning = nextRunning;
+        changed = true;
+      }
+      const title = String(val.summary ?? val.title ?? '').trim();
+      if (title && !entry.title) entry.title = title;
+
+      const latestStep = val.latestTaskBoundaryStep ?? val.lastStep ?? val.latestStep;
+      if (latestStep && typeof latestStep === 'object') {
+        const mu = extractStepModelUsage(latestStep);
+        if (mu?.model && !isShadowModel(mu.model) && !entry.modelId) {
+          entry.modelId = mu.model;
+        }
+      }
+
+      if (looksLikeConversationObject(val, id)) {
+        const rec = extractConvRecord(val, '', '', id, null, null);
+        const key = getConvMergeKey(rec);
+        netConvsById.set(key, mergeConvRecord(netConvsById.get(key), rec, { preferLatestExplicit: true }));
+      }
+      entry.updatedAt = Date.now();
+      convTelemetryById.delete(id);
+      convTelemetryById.set(id, entry);
+      pruneMapToLimit(convTelemetryById, MAX_TELEMETRY_CONVS);
+    }
+    return changed;
+  }
+
+  function ingestTelemetryDataTree(rootVal, meta = {}) {
+    if (!rootVal || typeof rootVal !== 'object') return false;
+    const visited = meta.visited instanceof WeakSet ? meta.visited : new WeakSet();
+    let budget = meta.source === 'fiber' ? 280 : 450;
+    let changed = false;
+
+    function walk(val, depth, inheritedConvId, parentKey) {
+      if (budget <= 0 || depth > 7 || isBlockedBridgeValue(val)) return;
+      try {
+        if ((typeof Node !== 'undefined' && val instanceof Node) || val.$$typeof) return;
+        if (visited.has(val)) return;
+        visited.add(val);
+        budget--;
+
+        if (val instanceof Map) {
+          for (const [k, v] of val.entries()) {
+            const ks = typeof k === 'string' ? k : '';
+            walk(v, depth + 1, inheritedConvId, ks);
+          }
+          return;
+        }
+        if (val instanceof Set) {
+          for (const item of val.values()) {
+            walk(item, depth + 1, inheritedConvId, '');
+          }
+          return;
+        }
+        if (Array.isArray(val)) {
+          for (let i = 0; i < val.length && i < 60; i++) {
+            walk(val[i], depth + 1, inheritedConvId, '');
+          }
+          return;
+        }
+
+        // 1. 捕获 activeConversationId / activeCascadeId
+        const activeCand =
+          val.activeCascadeId ??
+          val.activeConversationId ??
+          val.currentCascadeId ??
+          val.currentConversationId ??
+          val.selectedCascadeId;
+        if (typeof activeCand === 'string' && activeCand.trim().length >= 6) {
+          lastKnownActiveConvId = activeCand.trim();
+        }
+
+        // 2. 捕获模型配额与上下文配置 (`userStatus` / `cascadeModelConfigData` / `clientModelConfigs` / `currentModelConfig`)
+        const clientConfigs =
+          val.userStatus?.cascadeModelConfigData?.clientModelConfigs ??
+          val.cascadeModelConfigData?.clientModelConfigs ??
+          val.clientModelConfigs;
+        if (Array.isArray(clientConfigs)) {
+          for (const cfg of clientConfigs) {
+            if (upsertModelConfig(extractModelConfigInfo(cfg))) changed = true;
+          }
+        }
+        for (const key of ['currentModelConfig', 'selectedModelConfig', 'activeModelConfig', 'modelConfig']) {
+          if (val[key] && typeof val[key] === 'object') {
+            if (upsertModelConfig(extractModelConfigInfo(val[key]))) changed = true;
+          }
+        }
+        if ('quotaInfo' in val && ('modelOrAlias' in val || 'modelId' in val || 'label' in val)) {
+          if (upsertModelConfig(extractModelConfigInfo(val))) changed = true;
+        }
+
+        // 3. 捕获 `trajectorySummaries`
+        if (val.trajectorySummaries && typeof val.trajectorySummaries === 'object') {
+          if (ingestTrajectorySummaries(val.trajectorySummaries)) changed = true;
+        }
+
+        // 4. 捕获 `steps` / `trajectory.steps` / `turns` / `messages`
+        const localConvId = extractDirectConvId(val, parentKey) || inheritedConvId;
+        const primarySteps = Array.isArray(val.steps)
+          ? val.steps
+          : Array.isArray(val.trajectory?.steps)
+            ? val.trajectory.steps
+            : Array.isArray(val.cascade?.trajectory?.steps)
+              ? val.cascade.trajectory.steps
+              : null;
+        const fallbackTurns = !primarySteps
+          ? Array.isArray(val.turns)
+            ? val.turns
+            : Array.isArray(val.messages)
+              ? val.messages
+              : null
+          : null;
+        const targetArr = primarySteps || fallbackTurns;
+        if (targetArr && localConvId && looksLikeStepArray(targetArr)) {
+          const norm = normalizeConvState(val);
+          const stepOffset = toNonNegInt(
+            val.stepOffset ?? (depth === 0 ? meta.requestStepOffset : 0)
+          );
+          const isInc = Boolean(stepOffset > 0 || (depth === 0 && meta.isStepsEndpoint));
+          if (
+            upsertConvSteps(localConvId, targetArr, {
+              stepOffset,
+              isIncremental: isInc,
+              isStepsSource: Boolean(primarySteps),
+              source: meta.source || 'network',
+              isRunningHint: norm.state === 'running'
+            })
+          ) {
+            changed = true;
+          }
+        }
+
+        // 单步流式增量更新
+        if (val.step && typeof val.step === 'object' && localConvId) {
+          const idx = typeof val.stepIndex === 'number' ? val.stepIndex : toNonNegInt(val.index);
+          if (idx >= 0) {
+            if (
+              upsertConvSteps(localConvId, [val.step], {
+                stepOffset: idx,
+                isIncremental: true,
+                isStepsSource: true,
+                source: meta.source || 'network',
+                isRunningHint: isStepStatusRunning(val.step)
+              })
+            ) {
+              changed = true;
+            }
+          }
+        }
+
+        const keys = Object.keys(val);
+        for (let i = 0; i < keys.length && i < 45; i++) {
+          const k = keys[i];
+          if (
+            k.startsWith('_') ||
+            k === 'steps' ||
+            k === 'turns' ||
+            k === 'messages' ||
+            k === 'clientModelConfigs' ||
+            k === 'trajectorySummaries' ||
+            k === 'children' ||
+            k === 'stateNode' ||
+            k === 'return' ||
+            k === 'sibling' ||
+            k === 'child'
+          ) {
+            continue;
+          }
+          const child = val[k];
+          if (child && typeof child === 'object') {
+            walk(child, depth + 1, localConvId, k);
+          }
+        }
+      } catch {}
+    }
+
+    walk(rootVal, 0, meta.hintConvId || '', '');
+    return changed;
+  }
+
   function parseJsonSafely(rawText) {
     if (typeof rawText !== 'string' || rawText.length < 2 || rawText.length > 2_500_000) return null;
     let clean = rawText.trimStart();
@@ -1155,8 +2416,9 @@
     }
   }
 
-  function ingestNetworkPayload(data) {
-    if (!data || typeof data !== 'object') return;
+  function ingestNetworkPayload(data, meta = {}) {
+    if (!data || typeof data !== 'object') return false;
+    let changed = false;
     const outProjects = { byId: netProjectsById, byName: netProjectsByName };
     const tempConvs = new Map();
     scanArbitraryDataTree(data, new Set(), null, outProjects, tempConvs);
@@ -1164,72 +2426,296 @@
       for (const [k, conv] of tempConvs.entries()) {
         netConvsById.set(k, mergeConvRecord(netConvsById.get(k), conv, { preferLatestExplicit: true }));
       }
+      changed = true;
+    }
+    if (ingestTelemetryDataTree(data, meta)) {
+      changed = true;
+    }
+    if (changed) {
       netDataDirty = true;
     }
     pruneMapToLimit(netProjectsById);
     pruneMapToLimit(netProjectsByName);
     pruneMapToLimit(netConvsById);
+    return changed;
   }
 
   // ============================================================================
-  // 1. 被动只读监听 Fetch / XHR / WebSocket（兼容 JSON 与 Google `)]}'` 响应）
+  // 2. 被动只读监听 Fetch / XHR / WebSocket + 受控同源 Connect-RPC 补充
   // ============================================================================
+  function readHeaderCaseInsensitive(headers, targetLower) {
+    if (!headers) return '';
+    try {
+      if (typeof headers.get === 'function') {
+        return String(headers.get(targetLower) || '').trim();
+      }
+      if (Array.isArray(headers)) {
+        for (const pair of headers) {
+          if (
+            Array.isArray(pair) &&
+            pair.length >= 2 &&
+            String(pair[0] || '').toLowerCase() === targetLower
+          ) {
+            return String(pair[1] || '').trim();
+          }
+        }
+        return '';
+      }
+      if (typeof headers === 'object') {
+        for (const k of Object.keys(headers)) {
+          if (k.toLowerCase() === targetLower) {
+            return String(headers[k] || '').trim();
+          }
+        }
+      }
+    } catch {}
+    return '';
+  }
+
+  function parseReqBodyHint(rawBody) {
+    if (typeof rawBody !== 'string' || rawBody.length < 2 || rawBody.length > 32768) return null;
+    try {
+      const obj = JSON.parse(rawBody);
+      if (!obj || typeof obj !== 'object') return null;
+      const convId = String(obj.cascadeId ?? obj.conversationId ?? obj.trajectoryId ?? '').trim();
+      const stepOffset = toNonNegInt(obj.stepOffset);
+      return { convId, stepOffset };
+    } catch {
+      return null;
+    }
+  }
+
+  function inspectFetchArgs(input, init) {
+    const urlStr =
+      typeof input === 'string'
+        ? input
+        : input && typeof input.url === 'string'
+          ? input.url
+          : '';
+    if (urlStr.includes(LS_ENDPOINT_MARKER)) {
+      sawLanguageServerEndpoint = true;
+    }
+    let isSameOrigin = false;
+    try {
+      const resolved = new URL(urlStr, window.location.href);
+      isSameOrigin = resolved.origin === window.location.origin;
+    } catch {}
+    if (isSameOrigin) {
+      const csrf =
+        readHeaderCaseInsensitive(init?.headers, 'x-codeium-csrf-token') ||
+        readHeaderCaseInsensitive(input?.headers, 'x-codeium-csrf-token');
+      if (csrf) {
+        capturedCsrfToken = csrf;
+      }
+    }
+    const bodyHint = parseReqBodyHint(init?.body);
+    return {
+      source: 'fetch',
+      url: urlStr,
+      hintConvId: bodyHint?.convId || extractConvIdFromUrl(urlStr),
+      requestStepOffset: bodyHint?.stepOffset || 0,
+      isStepsEndpoint: /GetCascadeTrajectorySteps|GetCascadeTrajectory/i.test(urlStr)
+    };
+  }
+
+  function ingestTextLines(text, meta) {
+    if (!text) return;
+    const single = parseJsonSafely(text);
+    if (single) {
+      ingestNetworkPayload(single, meta);
+      return;
+    }
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length && i < 120; i++) {
+      let line = lines[i].trim();
+      if (!line) continue;
+      if (line.startsWith('data:')) {
+        line = line.slice(5).trim();
+        if (!line || line === '[DONE]') continue;
+      }
+      const parsed = parseJsonSafely(line);
+      if (parsed) ingestNetworkPayload(parsed, meta);
+    }
+  }
+
+  async function observeStreamingResponse(resp, meta, ct) {
+    try {
+      const cloned = resp.clone();
+      const reader = cloned.body?.getReader?.();
+      if (!reader || typeof TextDecoder !== 'function') return;
+      const decoder = new TextDecoder('utf-8');
+      const isConnectStream = ct.includes('connect+json');
+      let byteBuf = new Uint8Array(0);
+      let textBuf = '';
+      let totalBytes = 0;
+      let chunks = 0;
+
+      while (chunks < 400 && totalBytes < 5_000_000) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || !value.byteLength) continue;
+        chunks++;
+        totalBytes += value.byteLength;
+
+        if (isConnectStream) {
+          const merged = new Uint8Array(byteBuf.length + value.byteLength);
+          merged.set(byteBuf, 0);
+          merged.set(value, byteBuf.length);
+          byteBuf = merged;
+
+          while (byteBuf.length >= 5) {
+            const flags = byteBuf[0];
+            const frameLen =
+              ((byteBuf[1] << 24) | (byteBuf[2] << 16) | (byteBuf[3] << 8) | byteBuf[4]) >>> 0;
+            if ((flags === 0 || flags === 2) && frameLen > 0 && frameLen <= 2_500_000) {
+              if (byteBuf.length < 5 + frameLen) break;
+              const payloadStr = decoder.decode(byteBuf.subarray(5, 5 + frameLen));
+              byteBuf = byteBuf.subarray(5 + frameLen);
+              const parsed = parseJsonSafely(payloadStr);
+              if (parsed) ingestNetworkPayload(parsed, meta);
+            } else {
+              const fallbackTxt = decoder.decode(byteBuf, { stream: true });
+              byteBuf = new Uint8Array(0);
+              ingestTextLines(fallbackTxt, meta);
+              break;
+            }
+          }
+        } else {
+          textBuf += decoder.decode(value, { stream: true });
+          const lastNl = textBuf.lastIndexOf('\n');
+          if (lastNl >= 0) {
+            const ready = textBuf.slice(0, lastNl);
+            textBuf = textBuf.slice(lastNl + 1);
+            ingestTextLines(ready, meta);
+          }
+        }
+      }
+      if (!isConnectStream && textBuf.trim()) {
+        ingestTextLines(textBuf, meta);
+      }
+      try {
+        reader.releaseLock?.();
+      } catch {}
+    } catch {}
+  }
+
+  async function observeFetchResponse(resp, meta) {
+    try {
+      if (!resp) return;
+      if (typeof resp.url === 'string' && resp.url.includes(LS_ENDPOINT_MARKER)) {
+        sawLanguageServerEndpoint = true;
+      }
+      const ct = (resp.headers?.get('content-type') || '').toLowerCase();
+      if (ct.includes('event-stream') || ct.includes('ndjson') || ct.includes('connect+json')) {
+        await observeStreamingResponse(resp, meta, ct);
+        return;
+      }
+      if (ct.includes('json') || ct.includes('text/plain')) {
+        const txt = await resp.clone().text();
+        ingestTextLines(txt, meta);
+      }
+    } catch {}
+  }
+
+  async function observeFetchPromise(p, meta) {
+    try {
+      const resp = await p;
+      await observeFetchResponse(resp, meta);
+    } catch {}
+  }
+
   try {
     const origFetch = window.fetch;
     if (typeof origFetch === 'function') {
+      nativeFetchRef = origFetch;
       window.fetch = function (...args) {
+        let meta = null;
+        try {
+          meta = inspectFetchArgs(args[0], args[1]);
+        } catch {}
         const p = origFetch.apply(this, args);
-        p.then((resp) => {
-          try {
-            const ct = (resp.headers?.get('content-type') || '').toLowerCase();
-            if (ct.includes('json') || ct.includes('text/plain')) {
-              resp
-                .clone()
-                .text()
-                .then((txt) => {
-                  const parsed = parseJsonSafely(txt);
-                  if (parsed) ingestNetworkPayload(parsed);
-                })
-                .catch(() => {});
-            }
-          } catch {}
-        }).catch(() => {});
+        observeFetchPromise(p, meta);
         return p;
       };
     }
   } catch {}
 
   try {
-    const origOpen = XMLHttpRequest.prototype.open;
-    const origSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (...args) {
-      this.__agyTracked = true;
-      return origOpen.apply(this, args);
-    };
-    XMLHttpRequest.prototype.send = function (...args) {
-      if (this.__agyTracked) {
-        this.addEventListener('load', function () {
+    if (typeof XMLHttpRequest !== 'undefined' && XMLHttpRequest.prototype) {
+      const origOpen = XMLHttpRequest.prototype.open;
+      const origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (...args) {
+        this.__agyTracked = true;
+        try {
+          const rawUrl = typeof args[1] === 'string' ? args[1] : String(args[1] || '');
+          this.__agyUrl = rawUrl;
+          if (rawUrl.includes(LS_ENDPOINT_MARKER)) {
+            sawLanguageServerEndpoint = true;
+          }
+        } catch {}
+        return origOpen.apply(this, args);
+      };
+      XMLHttpRequest.prototype.send = function (...args) {
+        if (this.__agyTracked) {
+          let reqHint = null;
           try {
-            const ct = (this.getResponseHeader('content-type') || '').toLowerCase();
-            if ((ct.includes('json') || ct.includes('text/plain')) && typeof this.responseText === 'string') {
-              const parsed = parseJsonSafely(this.responseText);
-              if (parsed) ingestNetworkPayload(parsed);
-            }
+            reqHint = parseReqBodyHint(args[0]);
           } catch {}
-        });
-      }
-      return origSend.apply(this, args);
-    };
+          this.addEventListener('load', function () {
+            try {
+              const ct = (this.getResponseHeader('content-type') || '').toLowerCase();
+              if ((ct.includes('json') || ct.includes('text/plain')) && typeof this.responseText === 'string') {
+                const url = this.__agyUrl || '';
+                const parsed = parseJsonSafely(this.responseText);
+                if (parsed) {
+                  ingestNetworkPayload(parsed, {
+                    source: 'xhr',
+                    url,
+                    hintConvId: reqHint?.convId || extractConvIdFromUrl(url),
+                    requestStepOffset: reqHint?.stepOffset || 0,
+                    isStepsEndpoint: /GetCascadeTrajectorySteps|GetCascadeTrajectory/i.test(url)
+                  });
+                }
+              }
+            } catch {}
+          });
+        }
+        return origSend.apply(this, args);
+      };
+    }
   } catch {}
 
   try {
     const OrigWS = window.WebSocket;
     if (typeof OrigWS === 'function') {
       const PatchedWS = function (...args) {
+        const wsUrl = typeof args[0] === 'string' ? args[0] : String(args[0] || '');
+        if (wsUrl.includes(LS_ENDPOINT_MARKER)) {
+          sawLanguageServerEndpoint = true;
+        }
         const ws = new OrigWS(...args);
         ws.addEventListener('message', (ev) => {
-          const parsed = parseJsonSafely(ev.data);
-          if (parsed) ingestNetworkPayload(parsed);
+          try {
+            let textData = '';
+            if (typeof ev.data === 'string') {
+              textData = ev.data;
+            } else if (
+              typeof TextDecoder === 'function' &&
+              (ev.data instanceof ArrayBuffer || ArrayBuffer.isView(ev.data)) &&
+              ev.data.byteLength <= 2_000_000
+            ) {
+              textData = new TextDecoder().decode(ev.data);
+            }
+            if (!textData) return;
+            const parsed = parseJsonSafely(textData);
+            if (parsed) {
+              ingestNetworkPayload(parsed, {
+                source: 'ws',
+                url: wsUrl,
+                hintConvId: extractConvIdFromUrl(wsUrl)
+              });
+            }
+          } catch {}
         });
         return ws;
       };
@@ -1239,8 +2725,169 @@
     }
   } catch {}
 
+  async function callLsRpc(methodName, bodyObj) {
+    if (typeof document !== 'undefined' && document.hidden === true) return null;
+    const fetchFn = nativeFetchRef || window.fetch;
+    if (typeof fetchFn !== 'function') return null;
+
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {}
+        }, RPC_TIMEOUT_MS)
+      : null;
+
+    try {
+      const csrf = String(window.__APP_CONFIG__?.csrfToken || capturedCsrfToken || '').trim();
+      const headers = {
+        'Content-Type': 'application/json',
+        'Connect-Protocol-Version': '1'
+      };
+      if (csrf) {
+        headers['x-codeium-csrf-token'] = csrf;
+      }
+      const resp = await fetchFn.call(window, `${LS_ENDPOINT_MARKER}${methodName}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers,
+        body: JSON.stringify(bodyObj || {}),
+        signal: controller ? controller.signal : undefined
+      });
+      if (!resp || !resp.ok) return null;
+      const txt = await resp.text();
+      return parseJsonSafely(txt);
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function refreshLsSteps(preferredConvId) {
+    if (typeof document !== 'undefined' && document.hidden === true) return;
+    const now = Date.now();
+    const candidateIds = [];
+    const seenIds = new Set();
+
+    const addCandidate = (id) => {
+      if (!id || typeof id !== 'string') return;
+      const clean = id.trim();
+      if (!clean || clean.startsWith('composer-panel-') || seenIds.has(clean)) return;
+      seenIds.add(clean);
+      candidateIds.push(clean);
+    };
+
+    addCandidate(preferredConvId);
+    for (const [id, entry] of convTelemetryById.entries()) {
+      if (entry.isRunning) addCandidate(id);
+    }
+    for (const conv of netConvsById.values()) {
+      if (conv.convId && (conv.state === 'running' || conv.state === 'waiting')) {
+        addCandidate(conv.convId);
+      }
+    }
+
+    const targets = candidateIds.slice(0, 3);
+    for (const convId of targets) {
+      if (rpcState.stepsInFlight.has(convId)) continue;
+      const entry = convTelemetryById.get(convId);
+      const knownEnd = entry ? entry.stepOffsetBase + entry.steps.length : 0;
+      const totalSteps = entry?.totalStepCount || 0;
+      const needsCatchup = !entry || entry.steps.length === 0 || (totalSteps > 0 && knownEnd < totalSteps);
+      const ttl = entry?.isRunning ? RPC_STEPS_RUNNING_TTL_MS : RPC_STEPS_IDLE_TTL_MS;
+      const lastAt = rpcState.stepsAtByConv.get(convId) || 0;
+
+      if (!needsCatchup && now - lastAt < ttl) continue;
+      if (needsCatchup && now - lastAt < 1500) continue;
+
+      const stepOffset =
+        !entry || entry.steps.length === 0
+          ? totalSteps > 80
+            ? totalSteps - 80
+            : 0
+          : Math.max(0, knownEnd - 5);
+
+      rpcState.stepsInFlight.add(convId);
+      rpcState.stepsAtByConv.set(convId, now);
+      (async () => {
+        try {
+          const data = await callLsRpc('GetCascadeTrajectorySteps', {
+            cascadeId: convId,
+            stepOffset
+          });
+          if (data) {
+            rpcState.hasSuccess = true;
+            if (
+              ingestNetworkPayload(data, {
+                source: 'rpc',
+                endpoint: 'GetCascadeTrajectorySteps',
+                hintConvId: convId,
+                requestStepOffset: stepOffset,
+                isStepsEndpoint: true
+              })
+            ) {
+              netDataDirty = true;
+            }
+          }
+        } finally {
+          rpcState.stepsInFlight.delete(convId);
+        }
+      })();
+    }
+  }
+
+  function maybeRefreshLsRpc(preferredConvId = '') {
+    if (typeof document !== 'undefined' && document.hidden === true) return;
+    const hasAuthOrEndpoint = Boolean(window.__APP_CONFIG__?.csrfToken) || sawLanguageServerEndpoint;
+    if (!hasAuthOrEndpoint) return;
+    // 在官方 antigravity.google(.com) 域名下，除非确实观测到 LanguageServerService 流量，否则绝不主动发 RPC
+    if (isOfficialHost && !sawLanguageServerEndpoint) return;
+
+    const now = Date.now();
+    if (!rpcState.userStatusInFlight && now - rpcState.userStatusAt >= RPC_USER_STATUS_TTL_MS) {
+      rpcState.userStatusInFlight = true;
+      rpcState.userStatusAt = now;
+      (async () => {
+        try {
+          const data = await callLsRpc('GetUserStatus', {});
+          if (data) {
+            rpcState.hasSuccess = true;
+            if (ingestNetworkPayload(data, { source: 'rpc', endpoint: 'GetUserStatus' })) {
+              netDataDirty = true;
+            }
+          }
+        } finally {
+          rpcState.userStatusInFlight = false;
+        }
+      })();
+    }
+
+    if (!rpcState.trajectoriesInFlight && now - rpcState.trajectoriesAt >= RPC_TRAJECTORIES_TTL_MS) {
+      rpcState.trajectoriesInFlight = true;
+      rpcState.trajectoriesAt = now;
+      (async () => {
+        try {
+          const data = await callLsRpc('GetAllCascadeTrajectories', {});
+          if (data) {
+            rpcState.hasSuccess = true;
+            if (ingestNetworkPayload(data, { source: 'rpc', endpoint: 'GetAllCascadeTrajectories' })) {
+              netDataDirty = true;
+            }
+            refreshLsSteps(preferredConvId);
+          }
+        } finally {
+          rpcState.trajectoriesInFlight = false;
+        }
+      })();
+    } else {
+      refreshLsSteps(preferredConvId);
+    }
+  }
+
   // ============================================================================
-  // 2. React 18/19 Fiber 全深度 + Context dependencies + QueryClient/Store 提取器
+  // 3. React 18/19 Fiber 全深度 + Composer 面板 + Context/QueryClient/Store 提取器
   // ============================================================================
 
   function getReactFiber(el) {
@@ -1270,7 +2917,7 @@
   function fiberContainsMultipleSelector(fiber, selector) {
     let cur = fiber;
     for (let d = 0; d < 4 && cur; d++) {
-      if (cur.stateNode instanceof Element) {
+      if (typeof Element !== 'undefined' && cur.stateNode instanceof Element) {
         const count = cur.stateNode.querySelectorAll?.(selector)?.length || 0;
         if (count >= 2) return true;
         if (count === 1) return false;
@@ -1310,7 +2957,12 @@
       if (dep.memoizedValue && typeof dep.memoizedValue === 'object') {
         vals.push(dep.memoizedValue);
       }
-      if (dep.context && '_currentValue' in dep.context && dep.context._currentValue && typeof dep.context._currentValue === 'object') {
+      if (
+        dep.context &&
+        '_currentValue' in dep.context &&
+        dep.context._currentValue &&
+        typeof dep.context._currentValue === 'object'
+      ) {
         vals.push(dep.context._currentValue);
       }
       dep = dep.next;
@@ -1329,19 +2981,31 @@
   const discoveredQueryClients = new Set();
   const discoveredStores = new Set();
 
-  function inspectCandidateContainers(obj, knownLowerNames, lowerToCanonical, outProjects, outConvs) {
+  function inspectCandidateContainers(obj) {
     if (!obj || typeof obj !== 'object') return;
-    const maybeClient = obj.client || obj.queryClient || obj.value?.queryClient || (typeof obj.getQueryCache === 'function' ? obj : null);
+    const maybeClient =
+      obj.client ||
+      obj.queryClient ||
+      obj.value?.queryClient ||
+      (typeof obj.getQueryCache === 'function' ? obj : null);
     if (maybeClient && typeof maybeClient.getQueryCache === 'function') {
       discoveredQueryClients.add(maybeClient);
     }
-    const maybeStore = obj.store || obj.value?.store || (typeof obj.getState === 'function' ? obj : null);
+    const maybeStore =
+      obj.store || obj.value?.store || (typeof obj.getState === 'function' ? obj : null);
     if (maybeStore && typeof maybeStore.getState === 'function') {
       discoveredStores.add(maybeStore);
     }
   }
 
-  function scanTopLevelProvidersOnce(hostRoot, knownLowerNames, lowerToCanonical, outProjects, outConvs) {
+  function scanTopLevelProvidersOnce(
+    hostRoot,
+    knownLowerNames,
+    lowerToCanonical,
+    outProjects,
+    outConvs,
+    telemetryVisited
+  ) {
     if (!hostRoot) return;
     const queue = [hostRoot.stateNode?.current || hostRoot];
     let visited = 0;
@@ -1352,17 +3016,307 @@
       seen.add(f);
       visited++;
 
-      if (f.tag === 10 && f.memoizedProps && typeof f.memoizedProps.value === 'object' && f.memoizedProps.value) {
-        inspectCandidateContainers(f.memoizedProps.value, knownLowerNames, lowerToCanonical, outProjects, outConvs);
-        scanArbitraryDataTree(f.memoizedProps.value, knownLowerNames, lowerToCanonical, outProjects, outConvs, '', '');
+      if (
+        f.tag === 10 &&
+        f.memoizedProps &&
+        typeof f.memoizedProps.value === 'object' &&
+        f.memoizedProps.value
+      ) {
+        inspectCandidateContainers(f.memoizedProps.value);
+        scanArbitraryDataTree(
+          f.memoizedProps.value,
+          knownLowerNames,
+          lowerToCanonical,
+          outProjects,
+          outConvs,
+          '',
+          ''
+        );
+        ingestTelemetryDataTree(f.memoizedProps.value, { source: 'fiber', visited: telemetryVisited });
       }
       if (f.memoizedProps && typeof f.memoizedProps === 'object') {
-        inspectCandidateContainers(f.memoizedProps, knownLowerNames, lowerToCanonical, outProjects, outConvs);
+        inspectCandidateContainers(f.memoizedProps);
       }
 
       if (f.child) queue.push(f.child);
       if (f.sibling && visited < 160) queue.push(f.sibling);
     }
+  }
+
+  function getFallbackComposerConvId(el) {
+    if (!el || typeof el !== 'object') return `composer-panel-${++composerFallbackSeq}`;
+    let id = composerFallbackIds.get(el);
+    if (!id) {
+      composerFallbackSeq += 1;
+      id = `composer-panel-${composerFallbackSeq}`;
+      composerFallbackIds.set(el, id);
+    }
+    return id;
+  }
+
+  function scanComposerFooters(telemetryVisited) {
+    const composers = [];
+    const footerEls = Array.from(document.querySelectorAll?.('.agy-composer-footer') || []);
+    let rootFound = null;
+    const urlConvId = extractConvIdFromUrl(window.location?.href || '');
+
+    for (let panelIndex = 0; panelIndex < footerEls.length; panelIndex++) {
+      const footerEl = footerEls[panelIndex];
+      let convId = '';
+      let modelId = '';
+      let modelLabel = '';
+      let quota = null;
+      const pendingStepChunks = [];
+
+      try {
+        const attrEl = footerEl.closest?.('[data-cascade-id], [data-conversation-id], [data-trajectory-id]');
+        if (attrEl) {
+          const attrId =
+            attrEl.getAttribute('data-cascade-id') ||
+            attrEl.getAttribute('data-conversation-id') ||
+            attrEl.getAttribute('data-trajectory-id') ||
+            '';
+          if (attrId.trim().length >= 4) convId = attrId.trim();
+        }
+      } catch {}
+
+      let fiber = getReactFiber(footerEl);
+      if (fiber && !rootFound) {
+        rootFound = findHostRootFiber(fiber);
+      }
+      let reachedShared = false;
+
+      const inspectPanelObj = (obj, isPanelLocal) => {
+        if (!obj || typeof obj !== 'object') return;
+        inspectCandidateContainers(obj);
+        ingestTelemetryDataTree(obj, { source: 'fiber', visited: telemetryVisited });
+
+        if (!isPanelLocal) return;
+
+        if (!convId) {
+          const directId = extractDirectConvId(obj, '');
+          if (directId) convId = directId;
+        }
+        const modelCandidates = [
+          obj.currentModelConfig,
+          obj.selectedModelConfig,
+          obj.activeModelConfig,
+          obj.modelConfig,
+          obj.selectedModel,
+          obj.currentModel
+        ];
+        for (const mc of modelCandidates) {
+          if (!mc || typeof mc !== 'object') continue;
+          const info = extractModelConfigInfo(mc);
+          if (info) {
+            upsertModelConfig(info);
+            if (!modelId) modelId = info.modelId;
+            if (!modelLabel) modelLabel = info.label;
+            if (!quota && info.hasQuotaInfo) {
+              quota = {
+                remainingFraction: info.remainingFraction,
+                resetTimeMs: info.resetTimeMs
+              };
+            }
+          }
+        }
+        if (!quota && obj.quotaInfo && typeof obj.quotaInfo === 'object') {
+          const q = normalizeQuotaInfo(obj.quotaInfo);
+          if (q) quota = q;
+        }
+
+        const primarySteps = Array.isArray(obj.steps)
+          ? obj.steps
+          : Array.isArray(obj.trajectory?.steps)
+            ? obj.trajectory.steps
+            : null;
+        const fallbackTurns = !primarySteps
+          ? Array.isArray(obj.turns)
+            ? obj.turns
+            : Array.isArray(obj.messages)
+              ? obj.messages
+              : null
+          : null;
+        const arr = primarySteps || fallbackTurns;
+        if (arr && looksLikeStepArray(arr)) {
+          const ownId = extractDirectConvId(obj, '');
+          pendingStepChunks.push({
+            ownId,
+            arr,
+            isStepsSource: Boolean(primarySteps),
+            isRunningHint: normalizeConvState(obj).state === 'running'
+          });
+        }
+      };
+
+      for (let depth = 0; depth < 45 && fiber; depth++, fiber = fiber.return) {
+        if (!reachedShared && fiberContainsMultipleSelector(fiber, '.agy-composer-footer')) {
+          reachedShared = true;
+        }
+        const isPanelLocal = !reachedShared;
+        try {
+          if (fiber.memoizedProps && typeof fiber.memoizedProps === 'object') {
+            inspectPanelObj(fiber.memoizedProps, isPanelLocal);
+          }
+        } catch {}
+        try {
+          for (const val of collectFiberHooksAndContexts(fiber)) {
+            inspectPanelObj(val, isPanelLocal);
+          }
+        } catch {}
+      }
+
+      if (!convId && (footerEls.length === 1 || panelIndex === 0) && urlConvId) {
+        convId = urlConvId;
+      }
+      if (!convId) {
+        convId = getFallbackComposerConvId(footerEl);
+      }
+
+      for (const chunk of pendingStepChunks) {
+        upsertConvSteps(chunk.ownId || convId, chunk.arr, {
+          stepOffset: 0,
+          isIncremental: false,
+          isStepsSource: chunk.isStepsSource,
+          source: 'fiber',
+          isRunningHint: chunk.isRunningHint
+        });
+      }
+
+      const convEntry = convTelemetryById.get(convId);
+      const resolvedModelId = modelId || convEntry?.modelId || '';
+      const meta = findModelMeta(resolvedModelId, modelLabel);
+      const resolvedLabel = modelLabel || meta?.label || resolvedModelId || '';
+      const remainingFraction =
+        quota?.remainingFraction !== undefined && quota?.remainingFraction !== null
+          ? quota.remainingFraction
+          : meta?.remainingFraction ?? null;
+      const resetTimeMs =
+        quota?.resetTimeMs !== undefined && quota?.resetTimeMs !== null
+          ? quota.resetTimeMs
+          : meta?.resetTimeMs ?? null;
+
+      composers.push({
+        panelIndex,
+        convId,
+        modelId: resolvedModelId,
+        modelLabel: resolvedLabel,
+        remainingFraction,
+        resetTimeMs
+      });
+    }
+
+    return { composers, rootFound, urlConvId };
+  }
+
+  function buildTelemetryPayload(composers, urlConvId) {
+    const models = [];
+    for (const m of netModelsById.values()) {
+      if (isShadowModel(m.modelId, m.label)) continue;
+      models.push({
+        modelId: m.modelId,
+        label: m.label,
+        pool: m.pool,
+        contextLimit: getDynamicContextLimit(m.modelId, m.label),
+        remainingFraction: m.remainingFraction,
+        resetTimeMs: m.resetTimeMs
+      });
+    }
+
+    const quotaPools = { gemini: null, premium: null };
+    for (const m of models) {
+      if (m.pool !== 'gemini' && m.pool !== 'premium') continue;
+      if (m.remainingFraction === null && m.resetTimeMs === null) continue;
+      const cur = quotaPools[m.pool];
+      if (!cur) {
+        quotaPools[m.pool] = {
+          remainingFraction: m.remainingFraction,
+          resetTimeMs: m.resetTimeMs,
+          sampleLabel: m.label || m.modelId
+        };
+        continue;
+      }
+      let takeM = false;
+      if (m.remainingFraction !== null && cur.remainingFraction === null) {
+        takeM = true;
+      } else if (m.remainingFraction !== null && cur.remainingFraction !== null) {
+        if (m.remainingFraction < cur.remainingFraction) {
+          takeM = true;
+        } else if (
+          m.remainingFraction === cur.remainingFraction &&
+          m.resetTimeMs !== null &&
+          (cur.resetTimeMs === null || m.resetTimeMs < cur.resetTimeMs)
+        ) {
+          takeM = true;
+        }
+      } else if (
+        m.remainingFraction === null &&
+        cur.remainingFraction === null &&
+        m.resetTimeMs !== null &&
+        (cur.resetTimeMs === null || m.resetTimeMs < cur.resetTimeMs)
+      ) {
+        takeM = true;
+      }
+      if (takeM) {
+        quotaPools[m.pool] = {
+          remainingFraction: m.remainingFraction,
+          resetTimeMs: m.resetTimeMs,
+          sampleLabel: m.label || m.modelId
+        };
+      }
+    }
+
+    const composerByConvId = new Map();
+    for (const c of composers) {
+      if (c.convId && !composerByConvId.has(c.convId)) {
+        composerByConvId.set(c.convId, c);
+      }
+    }
+
+    const conversations = {};
+    for (const [convId, entry] of convTelemetryById.entries()) {
+      const comp = composerByConvId.get(convId) || null;
+      conversations[convId] = analyzeConversationSteps(entry, comp);
+    }
+
+    // 为有活跃 composer 但尚无历史步骤的面板补齐基础条目
+    for (const comp of composers) {
+      if (!comp.convId || conversations[comp.convId]) continue;
+      const emptyEntry = {
+        convId: comp.convId,
+        modelId: comp.modelId,
+        modelLabel: comp.modelLabel,
+        isRunning: false,
+        totalStepCount: 0,
+        stepOffsetBase: 0,
+        steps: [],
+        lastStreamTs: 0,
+        tokPerSec: 0,
+        avgTokPerSec: 0
+      };
+      conversations[comp.convId] = analyzeConversationSteps(emptyEntry, comp);
+    }
+
+    const realComposerConv = composers.find(
+      (c) => c.convId && !c.convId.startsWith('composer-panel-')
+    )?.convId;
+    let activeConvId =
+      realComposerConv || urlConvId || lastKnownActiveConvId || composers[0]?.convId || null;
+    if (!activeConvId) {
+      for (const [id, entry] of convTelemetryById.entries()) {
+        if (entry.isRunning) activeConvId = id;
+      }
+    }
+
+    return {
+      fetchedAt: Date.now(),
+      sourceMode: rpcState.hasSuccess ? 'rpc_assisted' : 'passive',
+      quotaPools,
+      models,
+      activeConvId,
+      composers,
+      conversations
+    };
   }
 
   function extractCollapsedProjectsFromPage(projectNames) {
@@ -1381,12 +3335,13 @@
     };
     const outConvs = new Map();
     const sharedFibersVisited = new WeakSet();
+    const telemetryVisited = new WeakSet();
 
     const scanSingleFiberData = (fiber, contextProjId, contextProjName) => {
       try {
         const props = fiber.memoizedProps;
         if (props && typeof props === 'object') {
-          inspectCandidateContainers(props, knownLowerNames, lowerToCanonical, outProjects, outConvs);
+          inspectCandidateContainers(props);
           scanArbitraryDataTree(
             props,
             knownLowerNames,
@@ -1396,13 +3351,14 @@
             contextProjId,
             contextProjName
           );
+          ingestTelemetryDataTree(props, { source: 'fiber', visited: telemetryVisited });
         }
       } catch {}
 
       try {
         for (const val of collectFiberHooksAndContexts(fiber)) {
           try {
-            inspectCandidateContainers(val, knownLowerNames, lowerToCanonical, outProjects, outConvs);
+            inspectCandidateContainers(val);
             scanArbitraryDataTree(
               val,
               knownLowerNames,
@@ -1412,13 +3368,14 @@
               contextProjId,
               contextProjName
             );
+            ingestTelemetryDataTree(val, { source: 'fiber', visited: telemetryVisited });
           } catch {}
         }
       } catch {}
     };
 
     let firstRoot = null;
-    const projEls = document.querySelectorAll('[data-agy-proj-name]');
+    const projEls = document.querySelectorAll?.('[data-agy-proj-name]') || [];
     for (const el of projEls) {
       const projName = el.getAttribute('data-agy-proj-name') || '';
       if (!projName) continue;
@@ -1448,7 +3405,7 @@
     }
 
     // 同步扫描已展开的对话行自身 Fiber，覆盖列表项组件局部 props/hooks 状态
-    const taskEls = document.querySelectorAll('[data-agy-parent-proj]');
+    const taskEls = document.querySelectorAll?.('[data-agy-parent-proj]') || [];
     for (const taskEl of taskEls) {
       const parentProjName = taskEl.getAttribute('data-agy-parent-proj') || '';
       let fiber = getReactFiber(taskEl);
@@ -1457,7 +3414,10 @@
       }
       let reachedSharedTaskAncestor = false;
       for (let depth = 0; depth < 16 && fiber; depth++, fiber = fiber.return) {
-        if (!reachedSharedTaskAncestor && fiberContainsMultipleSelector(fiber, '[data-agy-parent-proj]')) {
+        if (
+          !reachedSharedTaskAncestor &&
+          fiberContainsMultipleSelector(fiber, '[data-agy-parent-proj]')
+        ) {
           reachedSharedTaskAncestor = true;
         }
         if (reachedSharedTaskAncestor || sharedFibersVisited.has(fiber)) {
@@ -1466,14 +3426,40 @@
         }
         const contextProjName = reachedSharedTaskAncestor ? '' : parentProjName;
         const contextProjId =
-          (!reachedSharedTaskAncestor && contextProjName && outProjects.byName.get(contextProjName.toLowerCase())?.id) || '';
+          (!reachedSharedTaskAncestor &&
+            contextProjName &&
+            outProjects.byName.get(contextProjName.toLowerCase())?.id) ||
+          '';
         scanSingleFiberData(fiber, contextProjId, contextProjName);
       }
     }
 
+    // 扫描 `.agy-composer-footer` 面板提取当前模型、配额与会话步骤
+    const { composers, rootFound: composerRoot, urlConvId } = scanComposerFooters(telemetryVisited);
+    if (!firstRoot && composerRoot) {
+      firstRoot = composerRoot;
+    }
+
+    if (!firstRoot) {
+      try {
+        const fallbackNode =
+          document.querySelector?.('#root, #app, main, [data-testid="permissions-selector-trigger"]') ||
+          document.body?.firstElementChild;
+        const f = getReactFiber(fallbackNode);
+        if (f) firstRoot = findHostRootFiber(f);
+      } catch {}
+    }
+
     // 扫描顶层 Provider（仅覆盖顶层 Context.Provider 节点，速度极快）
     if (firstRoot) {
-      scanTopLevelProvidersOnce(firstRoot, knownLowerNames, lowerToCanonical, outProjects, outConvs);
+      scanTopLevelProvidersOnce(
+        firstRoot,
+        knownLowerNames,
+        lowerToCanonical,
+        outProjects,
+        outConvs,
+        telemetryVisited
+      );
     }
 
     // 直接读取缓存到的 QueryClient 与 Store
@@ -1481,14 +3467,25 @@
       try {
         for (const q of qc.getQueryCache().getAll()) {
           if (q?.state?.data) {
-            scanArbitraryDataTree(q.state.data, knownLowerNames, lowerToCanonical, outProjects, outConvs, '', '');
+            scanArbitraryDataTree(
+              q.state.data,
+              knownLowerNames,
+              lowerToCanonical,
+              outProjects,
+              outConvs,
+              '',
+              ''
+            );
+            ingestTelemetryDataTree(q.state.data, { source: 'fiber', visited: telemetryVisited });
           }
         }
       } catch {}
     }
     for (const st of discoveredStores) {
       try {
-        scanArbitraryDataTree(st.getState(), knownLowerNames, lowerToCanonical, outProjects, outConvs, '', '');
+        const stVal = st.getState();
+        scanArbitraryDataTree(stVal, knownLowerNames, lowerToCanonical, outProjects, outConvs, '', '');
+        ingestTelemetryDataTree(stVal, { source: 'fiber', visited: telemetryVisited });
       } catch {}
     }
 
@@ -1507,6 +3504,8 @@
         outConvs.set(k, { ...netRec });
       }
     }
+
+    const telemetry = buildTelemetryPayload(composers, urlConvId);
 
     // 汇总每个已知项目的 projectType 与 conversations
     const projectsResult = {};
@@ -1545,6 +3544,14 @@
         if (mapped && lowerToCanonical.has(mapped.toLowerCase())) {
           targetProjName = lowerToCanonical.get(mapped.toLowerCase());
         }
+      } else if (Array.isArray(conv.workspaceNames)) {
+        for (const wName of conv.workspaceNames) {
+          const lowW = String(wName || '').toLowerCase();
+          if (lowW && lowerToCanonical.has(lowW)) {
+            targetProjName = lowerToCanonical.get(lowW);
+            break;
+          }
+        }
       }
 
       if (!targetProjName || !projectsResult[targetProjName]) continue;
@@ -1562,6 +3569,8 @@
             ? { time: conv.timeText }
             : {};
 
+      const convTelemetry = conv.convId ? telemetry.conversations[conv.convId] || null : null;
+
       projectsResult[targetProjName].tasks.push({
         taskId: computedHref ? `href:${computedHref}` : `bridge:${targetProjName}::${conv.convId}`,
         convId: conv.convId,
@@ -1572,7 +3581,8 @@
         reasonVars,
         reason: conv.reason || (conv.timeText ? `Active ${conv.timeText}` : 'Idle (memory sync)'),
         timeText: conv.timeText || '',
-        isActive: false
+        isActive: false,
+        telemetry: convTelemetry
       });
     }
 
@@ -1584,7 +3594,16 @@
       };
     } catch {}
 
-    return { ok: true, projects: projectsResult, diagnostics };
+    return { ok: true, projects: projectsResult, telemetry, diagnostics };
+  }
+
+  // 验证过的 localhost 宿主页激活后主动预热一次受控同源 RPC
+  if (isLocalCandidate) {
+    setTimeout(() => {
+      try {
+        maybeRefreshLsRpc(extractConvIdFromUrl(window.location?.href || ''));
+      } catch {}
+    }, 50);
   }
 
   // 跨世界同步桥接协议（内置 500ms 短时缓存，路由变化自动失效）
@@ -1601,12 +3620,17 @@
         lastBridgeResultJson &&
         now - lastBridgeCacheTs < BRIDGE_CACHE_TTL_MS
       ) {
+        maybeRefreshLsRpc(lastResolvedActiveConvId);
         rootEl.setAttribute('data-agy-bridge-out', lastBridgeResultJson);
         return;
       }
 
       const projectNames = JSON.parse(rawIn);
       const res = extractCollapsedProjectsFromPage(projectNames);
+      if (res?.telemetry?.activeConvId) {
+        lastResolvedActiveConvId = res.telemetry.activeConvId;
+      }
+      maybeRefreshLsRpc(lastResolvedActiveConvId);
       const outJson = JSON.stringify(res);
       lastBridgeNamesKey = routeKey;
       lastBridgeResultJson = outJson;
@@ -1622,4 +3646,5 @@
       } catch {}
     }
   });
+  }
 })();

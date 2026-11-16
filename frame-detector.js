@@ -1,7 +1,7 @@
 /**
- * Antigravity Tab Status - Child Iframe Reporter (v2.7.0)
+ * Antigravity Tab Status - Child Iframe Reporter (v2.9.0)
  *
- * 运行于 https://antigravity.google(.com) 内部的子工作区 iframe：
+ * 运行于 https://antigravity.google(.com) 或已授权本地调试源内部的子工作区 iframe：
  * - 非 Antigravity 顶层页面首行 0.01ms 立即退出
  * - 零 Worker / 零 Blob，完全遵循严格 CSP 策略
  * - 扩展重载后旧脚本自动静默清理，不产生 Extension context invalidated 报错
@@ -14,12 +14,18 @@
   window.__AGY_FRAME_REPORTER_V201__ = true;
 
   const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const LOCAL_ORIGIN_RE = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+
+  function isAllowedTopOrigin(origin) {
+    return AGY_ORIGIN_RE.test(origin || '') || LOCAL_ORIGIN_RE.test(origin || '');
+  }
+
   let topOrigin = '';
   try {
     const origins = window.location.ancestorOrigins;
     if (origins && origins.length > 0) {
       const candidate = origins[origins.length - 1] || '';
-      if (AGY_ORIGIN_RE.test(candidate)) {
+      if (isAllowedTopOrigin(candidate)) {
         topOrigin = candidate;
       }
     }
@@ -29,6 +35,7 @@
   let lastSnapshotHash = '';
   let domObserver = null;
   let heartbeatId = null;
+  let capsuleConfig = { enabled: true, showInPageCapsule: false };
 
   function isContextAlive() {
     try {
@@ -54,16 +61,24 @@
   function dispatchSnapshot(force = false) {
     if (shutdownIfInvalidated()) return;
     const res = window.__AGY_SCANNER__.scanWorkspace();
-    if (!res || res.ignore) return;
+    if (!res || res.ignore) {
+      window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+      return;
+    }
+
+    const telemetry = res.telemetry || null;
+    const capsuleEnabled = Boolean(capsuleConfig.enabled && capsuleConfig.showInPageCapsule);
+    window.__AGY_SCANNER__?.syncInPageCapsules?.(capsuleEnabled, telemetry);
 
     const snapshotPayload = {
       type: 'ANTIGRAVITY_WORKSPACE_SYNC',
       frameUid: FRAME_UID,
       activePane: res.activePane,
-      projects: res.projects
+      projects: res.projects,
+      telemetry
     };
 
-    const hash = JSON.stringify({ a: res.activePane, p: res.projects });
+    const hash = JSON.stringify({ a: res.activePane, p: res.projects, t: telemetry });
     if (!force && hash === lastSnapshotHash) return;
     lastSnapshotHash = hash;
 
@@ -82,7 +97,8 @@
             type: 'CHILD_FRAME_SYNC',
             frameUid: FRAME_UID,
             activePane: res.activePane,
-            projects: res.projects
+            projects: res.projects,
+            telemetry
           },
           () => {
             void chrome.runtime.lastError;
@@ -95,7 +111,7 @@
   window.addEventListener('message', (event) => {
     if (shutdownIfInvalidated()) return;
     if (event.source !== window.top) return;
-    if (!AGY_ORIGIN_RE.test(event.origin || '')) return;
+    if (!isAllowedTopOrigin(event.origin || '')) return;
     if (event.data?.type === 'AGY_FOCUS_TASK' && event.data.taskId) {
       if (
         window.__AGY_SCANNER__.focusTaskById(
@@ -107,9 +123,10 @@
         setTimeout(() => dispatchSnapshot(true), 160);
       }
     } else if (event.data?.type === 'AGY_PROBE_COLLAPSED') {
-      window.__AGY_SCANNER__.probeCollapsedProjects?.(true).then(() => {
+      void (async () => {
+        await window.__AGY_SCANNER__.probeCollapsedProjects?.(true);
         dispatchSnapshot(true);
-      });
+      })();
     } else if (event.data?.type === 'AGY_SYNC_NOW') {
       runWithTimestamp(true);
     }
@@ -132,9 +149,10 @@
           if (hit) setTimeout(() => dispatchSnapshot(true), 160);
           sendResponse({ ok: hit });
         } else if (message?.type === 'PROBE_COLLAPSED_IN_FRAME') {
-          window.__AGY_SCANNER__.probeCollapsedProjects?.(true).then(() => {
+          void (async () => {
+            await window.__AGY_SCANNER__.probeCollapsedProjects?.(true);
             dispatchSnapshot(true);
-          });
+          })();
           sendResponse({ ok: true });
         } else if (message?.type === 'SYNC_NOW_IN_FRAME') {
           runWithTimestamp(true);
@@ -185,8 +203,28 @@
   }
 
   try {
+    if (isContextAlive() && chrome.storage?.sync) {
+      chrome.storage.sync.get({ enabled: true, showInPageCapsule: false }, (items) => {
+        if (chrome.runtime.lastError) return;
+        capsuleConfig = {
+          enabled: items?.enabled !== false,
+          showInPageCapsule: Boolean(items?.showInPageCapsule)
+        };
+        runWithTimestamp(true);
+      });
+    }
     if (isContextAlive() && chrome.storage?.onChanged) {
-      chrome.storage.onChanged.addListener(() => runWithTimestamp(true));
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName === 'sync' && changes) {
+          if ('enabled' in changes) {
+            capsuleConfig.enabled = changes.enabled.newValue !== false;
+          }
+          if ('showInPageCapsule' in changes) {
+            capsuleConfig.showInPageCapsule = Boolean(changes.showInPageCapsule.newValue);
+          }
+        }
+        runWithTimestamp(true);
+      });
     }
   } catch {}
 
@@ -206,6 +244,11 @@
       }
     } catch {}
   });
+
+  if (LOCAL_ORIGIN_RE.test(topOrigin) || window.location.protocol === 'http:') {
+    setTimeout(() => runWithTimestamp(true), 1500);
+    setTimeout(() => runWithTimestamp(true), 4500);
+  }
 
   heartbeatId = setInterval(() => runWithTimestamp(true), 900);
   runWithTimestamp(true);

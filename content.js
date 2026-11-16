@@ -1,5 +1,5 @@
 /**
- * Antigravity Tab Status - Top Frame Multi-Project Aggregator & Tab Status Light Presenter (v2.8.0)
+ * Antigravity Tab Status - Top Frame Multi-Project Aggregator & Tab Status Light Presenter (v2.9.0)
  *
  * 严格兼容页面 Content Security Policy (worker-src 'self' / img-src 'self')：
  * - 完全移除页面内 Blob / Worker 创建，改用扩展后台 Service Worker Port 驱动动画与防抖计时器
@@ -21,18 +21,32 @@
   const TITLE_SUFFIX_RE =
     /\s*·\s*(?:🔴|🔔|🟠|🟢|✅|🔵|⏳)\s*(?:待处理|未读|运行中|Waiting|Unread|Running)(?:\(\d+\))?$/;
   const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const LOCAL_ORIGIN_RE = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
   const ALLOWED_CHILD_SITE_DOMAINS = [
     'antigravity.google.com',
     'antigravity.google',
     'usercontent.goog'
   ];
 
+  function isLocalTopPage() {
+    const host = (window.location.hostname || '').toLowerCase();
+    return window.location.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1');
+  }
+
+  function isAllowedTopOrigin(rawOrigin) {
+    return AGY_ORIGIN_RE.test(rawOrigin || '') || LOCAL_ORIGIN_RE.test(rawOrigin || '');
+  }
+
   function isAllowedChildOrigin(rawOrigin) {
     if (typeof rawOrigin !== 'string' || !rawOrigin || rawOrigin === 'null') return false;
     try {
       const parsed = new URL(rawOrigin);
-      if (parsed.origin === 'null' || parsed.protocol !== 'https:') return false;
+      if (parsed.origin === 'null') return false;
       const host = parsed.hostname.toLowerCase();
+      if (parsed.protocol === 'http:') {
+        return host === 'localhost' || host === '127.0.0.1';
+      }
+      if (parsed.protocol !== 'https:') return false;
       return ALLOWED_CHILD_SITE_DOMAINS.some(
         (domain) => host === domain || host.endsWith(`.${domain}`)
       );
@@ -62,14 +76,14 @@
       const childHref = frameEl.contentWindow?.location?.href || '';
       if (
         (childHref === 'about:blank' || childHref.startsWith('about:srcdoc')) &&
-        AGY_ORIGIN_RE.test(window.location.origin)
+        isAllowedTopOrigin(window.location.origin)
       ) {
         return window.location.origin;
       }
     } catch {}
     const rawSrc = frameEl.getAttribute('src') || frameEl.src || '';
     if (!rawSrc || rawSrc.startsWith('about:')) {
-      return AGY_ORIGIN_RE.test(window.location.origin) ? window.location.origin : '';
+      return isAllowedTopOrigin(window.location.origin) ? window.location.origin : '';
     }
     try {
       const parsed = new URL(rawSrc, window.location.href);
@@ -97,6 +111,9 @@
     iconLayout: 'standalone', // 'standalone' | 'badge'
     badgeSize: 'standard',    // 'standard' | 'large' (used when iconLayout === 'badge')
     autoProbeCollapsed: false,
+    showQuotaMetrics: true,
+    showContextMetrics: true,
+    showInPageCapsule: false,
     customWaitingSelector: '',
     customRunningSelector: ''
   };
@@ -124,6 +141,9 @@
       iconLayout: VALID_LAYOUTS.has(src.iconLayout) ? src.iconLayout : DEFAULT_CONFIG.iconLayout,
       badgeSize: VALID_BADGE_SIZES.has(src.badgeSize) ? src.badgeSize : DEFAULT_CONFIG.badgeSize,
       autoProbeCollapsed: Boolean(src.autoProbeCollapsed),
+      showQuotaMetrics: src.showQuotaMetrics !== false,
+      showContextMetrics: src.showContextMetrics !== false,
+      showInPageCapsule: Boolean(src.showInPageCapsule),
       customWaitingSelector: typeof src.customWaitingSelector === 'string' ? src.customWaitingSelector : '',
       customRunningSelector: typeof src.customRunningSelector === 'string' ? src.customRunningSelector : ''
     };
@@ -135,11 +155,19 @@
   let globalReason = t('reasonInit', {}, 'Waiting for tasks to start');
   let previewState = null;         // null | 'waiting' | 'unread' | 'running'
   let latestProjects = [];
+  let latestTelemetry = null;
   let latestCounts = { waiting: 0, unread: 0, running: 0, total: 0 };
   let lastBadgeKey = '';
   let lastPresentationKey = '';
 
   const childFrames = new Map();
+  let localHostWasConfirmed = !isLocalTopPage();
+
+  function isLocalHostConfirmed() {
+    if (!isLocalTopPage()) return true;
+    if (childFrames.size > 0) return true;
+    return Boolean(window.__AGY_SCANNER__?.isLocalAntigravityConfirmed?.());
+  }
   const taskTracker = new Map();
   const stickyWaitingByTitle = new Map();
   const topCollapsedCache = new Map();
@@ -1482,6 +1510,7 @@
   }
 
   function syncTabTitlePresentation() {
+    if (isLocalTopPage() && !isLocalHostConfirmed()) return;
     const currentRaw = document.title || '';
     const currentStripped = stripTitleStatusSuffix(currentRaw);
     if (!isMutatingTitle && currentRaw !== lastWrittenTitle) {
@@ -1507,6 +1536,7 @@
   }
 
   function syncFaviconPresentation() {
+    if (isLocalTopPage() && !isLocalHostConfirmed()) return;
     const effective = getEffectiveGlobalState();
     stopAnimationTicker();
 
@@ -1559,6 +1589,7 @@
 
   function syncToolbarActionBadge(waitingCount, unreadCount) {
     if (!isContextAlive()) return;
+    if (isLocalTopPage() && !isLocalHostConfirmed()) return;
     const totalAttention = config.enabled ? waitingCount + unreadCount : 0;
     const hasWaiting = config.enabled && waitingCount > 0;
     const nextKey = `${totalAttention}:${hasWaiting ? 1 : 0}`;
@@ -1585,12 +1616,115 @@
 
   const STATE_RANK = { waiting: 4, unread: 3, running: 2, idle: 1, none: 0 };
 
+  function mergeTelemetry(sources) {
+    const valid = [];
+    for (const item of sources) {
+      if (!item || !item.telemetry || typeof item.telemetry !== 'object') continue;
+      valid.push({
+        telemetry: item.telemetry,
+        isTop: Boolean(item.isTop),
+        fetchedAt: Number(item.telemetry.fetchedAt) || 0
+      });
+    }
+    if (valid.length === 0) return null;
+
+    const byNewest = [...valid].sort((a, b) => b.fetchedAt - a.fetchedAt);
+    const maxFetchedAt = byNewest[0].fetchedAt;
+
+    const quotaPools = { gemini: null, premium: null };
+    for (const poolKey of ['gemini', 'premium']) {
+      for (const src of byNewest) {
+        const poolVal = src.telemetry.quotaPools?.[poolKey];
+        if (poolVal && typeof poolVal === 'object') {
+          quotaPools[poolKey] = poolVal;
+          break;
+        }
+      }
+    }
+    for (const src of byNewest) {
+      const qp = src.telemetry.quotaPools;
+      if (qp && typeof qp === 'object') {
+        for (const [k, v] of Object.entries(qp)) {
+          if (!(k in quotaPools) && v && typeof v === 'object') {
+            quotaPools[k] = v;
+          }
+        }
+      }
+    }
+
+    let models = [];
+    for (const src of byNewest) {
+      if (Array.isArray(src.telemetry.models) && src.telemetry.models.length > 0) {
+        models = src.telemetry.models;
+        break;
+      }
+    }
+
+    let composers = [];
+    const topWithComposers = valid.find(
+      (s) => s.isTop && Array.isArray(s.telemetry.composers) && s.telemetry.composers.length > 0
+    );
+    if (topWithComposers) {
+      composers = topWithComposers.telemetry.composers;
+    } else {
+      for (const src of byNewest) {
+        if (Array.isArray(src.telemetry.composers) && src.telemetry.composers.length > 0) {
+          composers = src.telemetry.composers;
+          break;
+        }
+      }
+    }
+
+    let activeConvId = '';
+    for (const src of byNewest) {
+      if (typeof src.telemetry.activeConvId === 'string' && src.telemetry.activeConvId) {
+        activeConvId = src.telemetry.activeConvId;
+        break;
+      }
+    }
+
+    const convRank = new Map();
+    const conversations = {};
+    for (const src of valid) {
+      const convMap = src.telemetry.conversations;
+      if (!convMap || typeof convMap !== 'object') continue;
+      for (const [convId, conv] of Object.entries(convMap)) {
+        if (!conv || typeof conv !== 'object') continue;
+        const precisionScore = conv.precision === 'exact' ? 2 : 1;
+        const prev = convRank.get(convId);
+        if (
+          !prev ||
+          precisionScore > prev.precisionScore ||
+          (precisionScore === prev.precisionScore && src.fetchedAt >= prev.fetchedAt)
+        ) {
+          convRank.set(convId, { precisionScore, fetchedAt: src.fetchedAt });
+          conversations[convId] = conv;
+        }
+      }
+    }
+
+    const sourceMode = valid.some((s) => s.telemetry.sourceMode === 'rpc_assisted')
+      ? 'rpc_assisted'
+      : 'passive';
+
+    return {
+      fetchedAt: maxFetchedAt,
+      sourceMode,
+      quotaPools,
+      models,
+      activeConvId,
+      composers,
+      conversations
+    };
+  }
+
   function mergeFrameWorkspaces() {
     const now = Date.now();
     const topScan = window.__AGY_SCANNER__
       ? window.__AGY_SCANNER__.scanWorkspace()
-      : { activePane: { state: 'none', reason: '' }, projects: [] };
+      : { activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
 
+    const telemetrySources = [{ telemetry: topScan.telemetry || null, isTop: true }];
     let bestActivePane = topScan.activePane || { state: 'none', reason: '' };
     const projectMap = new Map();
     let activeChildCount = 0;
@@ -1649,6 +1783,9 @@
         continue;
       }
       activeChildCount++;
+      if (entry.telemetry) {
+        telemetrySources.push({ telemetry: entry.telemetry, isTop: false });
+      }
       if (
         entry.activePane &&
         (STATE_RANK[entry.activePane.state] || 0) > (STATE_RANK[bestActivePane.state] || 0)
@@ -1657,6 +1794,8 @@
       }
       ingestProjects(entry.projects, frameKey);
     }
+
+    const mergedTelemetry = mergeTelemetry(telemetrySources);
 
     const mergedProjects = [];
     for (const [projectName, entry] of projectMap.entries()) {
@@ -1676,6 +1815,15 @@
           entry.knownEmpty = true;
         } else if (Array.isArray(cached.tasks) && cached.tasks.length > 0) {
           tasks = cached.tasks.map((task) => ({ ...task, fromCollapsedCache: true }));
+        }
+      }
+
+      for (const task of tasks) {
+        if (!task.convId && task.isActive && mergedTelemetry?.activeConvId) {
+          task.convId = mergedTelemetry.activeConvId;
+        }
+        if (task.convId && mergedTelemetry?.conversations?.[task.convId]) {
+          task.telemetry = mergedTelemetry.conversations[task.convId];
         }
       }
 
@@ -1714,26 +1862,44 @@
               tasks: []
             });
           }
+          const activeConvId = mergedTelemetry?.activeConvId || '';
           mergedProjects[0].tasks.unshift({
             taskId: 'active-open-pane',
+            convId: activeConvId,
             title: t('fallbackOpenConvTitle', {}, 'Open Conversation'),
             state: bestActivePane.state,
             reason: bestActivePane.reason,
             timeText: t('taskCurrentTag', {}, 'Current'),
             isActive: true,
-            sourceFrame: 'top'
+            sourceFrame: 'top',
+            telemetry: (activeConvId && mergedTelemetry?.conversations?.[activeConvId]) || null
           });
         }
       }
     }
 
-    return { mergedProjects, activeChildCount };
+    return { mergedProjects, activeChildCount, mergedTelemetry };
   }
 
   function evaluateAllProjects() {
     if (shutdownIfInvalidated()) return;
+    if (isLocalTopPage() && !isLocalHostConfirmed()) {
+      window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+      return;
+    }
+    if (isLocalTopPage() && !localHostWasConfirmed) {
+      localHostWasConfirmed = true;
+      rebuildAllFrames();
+      void ensureBaseIconLoaded(true);
+    }
+
     const now = Date.now();
-    const { mergedProjects, activeChildCount } = mergeFrameWorkspaces();
+    const { mergedProjects, activeChildCount, mergedTelemetry } = mergeFrameWorkspaces();
+    latestTelemetry = mergedTelemetry;
+    window.__AGY_SCANNER__?.syncInPageCapsules?.(
+      Boolean(config.enabled && config.showInPageCapsule),
+      latestTelemetry
+    );
 
     let needsDebounceRecheck = false;
     let waitingCount = 0;
@@ -1971,10 +2137,11 @@
     syncTabPresentation();
   }
 
-  function recordChildSync(frameKey, activePane, projects) {
+  function recordChildSync(frameKey, activePane, projects, telemetry = null) {
     childFrames.set(frameKey || 'default-child', {
       activePane: activePane || { state: 'none', reason: '' },
       projects: Array.isArray(projects) ? projects : [],
+      telemetry: telemetry && typeof telemetry === 'object' ? telemetry : null,
       ts: Date.now()
     });
     evaluateAllProjects();
@@ -2000,7 +2167,12 @@
     const data = event.data;
     if (!data || typeof data !== 'object') return;
     if (data.type === 'ANTIGRAVITY_WORKSPACE_SYNC') {
-      recordChildSync(data.frameUid || 'postmsg-child', data.activePane, data.projects);
+      recordChildSync(
+        data.frameUid || 'postmsg-child',
+        data.activePane,
+        data.projects,
+        data.telemetry || null
+      );
     }
   });
 
@@ -2024,13 +2196,22 @@
       if (!isContextAlive() || !message || typeof message !== 'object') return false;
 
       if (message.type === 'RELAYED_CHILD_SYNC') {
-        recordChildSync(message.frameKey, message.activePane, message.projects);
+        recordChildSync(
+          message.frameKey,
+          message.activePane,
+          message.projects,
+          message.telemetry || null
+        );
         return false;
       }
 
       if (message.type === 'RELAYED_CHILD_UNLOAD' && message.frameKey) {
         childFrames.delete(message.frameKey);
         evaluateAllProjects();
+        return false;
+      }
+
+      if (isLocalTopPage() && !isLocalHostConfirmed()) {
         return false;
       }
 
@@ -2049,9 +2230,10 @@
 
       if (message.type === 'PROBE_COLLAPSED' || message.type === 'PROBE_COLLAPSED_IN_FRAME') {
         if (window.__AGY_SCANNER__?.probeCollapsedProjects) {
-          window.__AGY_SCANNER__.probeCollapsedProjects(true).then(() => {
+          void (async () => {
+            await window.__AGY_SCANNER__.probeCollapsedProjects(true);
             evaluateAllProjects();
-          });
+          })();
         }
         if (message.type === 'PROBE_COLLAPSED') {
           for (const frameEl of document.querySelectorAll('iframe')) {
@@ -2081,6 +2263,9 @@
           indicatorStyle: config.indicatorStyle,
           iconLayout: config.iconLayout,
           badgeSize: config.badgeSize,
+          showQuotaMetrics: config.showQuotaMetrics,
+          showContextMetrics: config.showContextMetrics,
+          showInPageCapsule: config.showInPageCapsule,
           pageTitle: stripTitleStatusSuffix(savedBaseTitle || document.title || ''),
           workspaceLabel: deriveWorkspaceLabel(),
           pageUrl: location.href,
@@ -2088,6 +2273,7 @@
           detectedState: currentGlobalState,
           counts: latestCounts,
           projects: latestProjects,
+          telemetry: latestTelemetry,
           activeChildCount: childFrames.size,
           reason: previewState
             ? t(
@@ -2159,10 +2345,14 @@
             indicatorStyle: config.indicatorStyle,
             iconLayout: config.iconLayout,
             badgeSize: config.badgeSize,
+            showQuotaMetrics: config.showQuotaMetrics,
+            showContextMetrics: config.showContextMetrics,
+            showInPageCapsule: config.showInPageCapsule,
             globalState: currentGlobalState,
             counts: latestCounts,
             activeChildFrames: childFrames.size,
             projects: latestProjects,
+            telemetry: latestTelemetry,
             reason: globalReason,
             diagnostics: window.__AGY_SCANNER__?.scanDiagnostics?.() || null
           }
@@ -2176,6 +2366,10 @@
     chrome.storage.sync.get(DEFAULT_CONFIG, (items) => {
       const hasStorageError = Boolean(chrome.runtime.lastError);
       config = normalizeConfig(hasStorageError ? DEFAULT_CONFIG : items);
+      if (isLocalTopPage() && !isLocalHostConfirmed()) {
+        window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+        return;
+      }
       rebuildAllFrames();
       evaluateAllProjects();
       syncTabPresentation();
@@ -2197,6 +2391,10 @@
       }
       if (!changedConfig) return;
       config = normalizeConfig(nextRaw);
+      if (isLocalTopPage() && !isLocalHostConfirmed()) {
+        window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+        return;
+      }
       if (needRebuild) rebuildAllFrames();
       else syncTabPresentation();
       evaluateAllProjects();
@@ -2241,7 +2439,14 @@
 
   const head = document.head || document.documentElement;
   headObserver = new MutationObserver((mutations) => {
-    if (isMutatingFavicon || isMutatingTitle || shutdownIfInvalidated()) return;
+    if (
+      isMutatingFavicon ||
+      isMutatingTitle ||
+      shutdownIfInvalidated() ||
+      (isLocalTopPage() && !isLocalHostConfirmed())
+    ) {
+      return;
+    }
     let titleTouched = false;
     for (const m of mutations) {
       if (
@@ -2281,8 +2486,27 @@
     } catch {}
   });
 
-  ensureBaseIconLoaded(true).then(() => {
-    evaluateAllProjects();
-    syncTabPresentation();
-  });
+  if (!isLocalTopPage() || isLocalHostConfirmed()) {
+    void (async () => {
+      await ensureBaseIconLoaded(true);
+      evaluateAllProjects();
+      syncTabPresentation();
+    })();
+  }
+
+  if (isLocalTopPage()) {
+    const probeLocalHydration = () => {
+      if (shutdownIfInvalidated()) return;
+      if (!isLocalHostConfirmed()) return;
+      if (!localHostWasConfirmed) {
+        localHostWasConfirmed = true;
+        rebuildAllFrames();
+        void ensureBaseIconLoaded(true);
+      }
+      evaluateAllProjects();
+      syncTabPresentation();
+    };
+    window.setTimeout(probeLocalHydration, 1500);
+    window.setTimeout(probeLocalHydration, 4500);
+  }
 })();

@@ -1,5 +1,5 @@
 /**
- * Antigravity Tab Status - Multi-Instance Global Panel & Side Panel Controller (v2.8.0)
+ * Antigravity Tab Status - Multi-Instance Global Panel & Side Panel Controller (v2.9.0)
  */
 
 const i18n = window.__AGY_I18N__ || null;
@@ -20,6 +20,7 @@ const VALID_INDICATOR_STYLES = new Set(['antigravity', 'gemini', 'glow', 'claude
 const VALID_ICON_LAYOUTS = new Set(['standalone', 'badge']);
 const VALID_BADGE_SIZES = new Set(['standard', 'large']);
 const VALID_CLICK_MODES = new Set(['popup', 'sidepanel']);
+const LOCALHOST_ORIGINS = ['http://localhost/*', 'http://127.0.0.1/*'];
 const STATE_PRIORITY = { waiting: 4, unread: 3, completed: 3, running: 2, idle: 1 };
 
 const STATE_META = {
@@ -48,6 +49,7 @@ const pillWaiting = document.getElementById('pillWaiting');
 const pillUnread = document.getElementById('pillUnread');
 const pillRunning = document.getElementById('pillRunning');
 const pillTotal = document.getElementById('pillTotal');
+const quotaStrip = document.getElementById('quotaStrip');
 const actionBanner = document.getElementById('actionBanner');
 const primaryActionBtn = document.getElementById('primaryActionBtn');
 
@@ -64,7 +66,11 @@ const iconLayoutButtons = Array.from(document.querySelectorAll('#iconLayoutGroup
 const badgeSizeRow = document.getElementById('badgeSizeRow');
 const sizeButtons = Array.from(document.querySelectorAll('#badgeSizeGroup .seg-btn'));
 const actionClickButtons = Array.from(document.querySelectorAll('#actionClickModeGroup .seg-btn'));
+const showQuotaToggle = document.getElementById('showQuotaToggle');
+const showContextToggle = document.getElementById('showContextToggle');
+const showInPageCapsuleToggle = document.getElementById('showInPageCapsuleToggle');
 const autoProbeCollapsedToggle = document.getElementById('autoProbeCollapsedToggle');
+const localhostAccessBtn = document.getElementById('localhostAccessBtn');
 const waitingInput = document.getElementById('waitingSelector');
 const runningInput = document.getElementById('runningSelector');
 const saveSelectorsBtn = document.getElementById('saveSelectorsBtn');
@@ -82,8 +88,13 @@ let currentIndicatorStyle = 'glow';
 let currentIconLayout = 'standalone';
 let currentBadgeSize = 'standard';
 let currentActionClickMode = 'popup';
+let currentShowQuotaMetrics = true;
+let currentShowContextMetrics = true;
+let currentShowInPageCapsule = false;
+let localhostGranted = false;
 let currentPrimaryAction = null; // 'open' | 'reload' | null
 let lastRenderedDigest = '';
+let lastQuotaDigest = '';
 let lastInstanceBarDigest = '';
 let feedbackTimerId = null;
 let lastFeedbackText = '';
@@ -133,6 +144,10 @@ function isAntigravityUrl(url) {
   if (!url) return false;
   try {
     const parsed = new URL(url);
+    if (parsed.protocol === 'http:') {
+      return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    }
+    if (parsed.protocol !== 'https:') return false;
     return (
       parsed.hostname === 'antigravity.google.com' ||
       parsed.hostname.endsWith('.antigravity.google.com') ||
@@ -246,6 +261,251 @@ function activateBrowserTab(tabId, windowId) {
   }
 }
 
+function formatTokenCount(rawTokens) {
+  const n = Math.max(0, Number(rawTokens) || 0);
+  if (n >= 1000000) {
+    return `${(n / 1000000).toFixed(2).replace(/\.?0+$/, '')}M`;
+  }
+  if (n >= 100000) {
+    return `${Math.round(n / 1000)}k`;
+  }
+  if (n >= 1000) {
+    return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return String(Math.round(n));
+}
+
+function formatQuotaReset(resetTimeMs) {
+  const ts = Number(resetTimeMs);
+  if (!Number.isFinite(ts) || ts <= 946684800000) return '';
+  const diffMs = ts - Date.now();
+  if (diffMs <= 60000) {
+    return t('quotaResetsSoon', {}, 'Resets soon');
+  }
+  const totalMins = Math.ceil(diffMs / 60000);
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  let timeStr = '';
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    const remHours = hours % 24;
+    timeStr = remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
+  } else if (hours > 0) {
+    timeStr = mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  } else {
+    timeStr = `${totalMins}m`;
+  }
+  return t('quotaResetsIn', { time: timeStr }, `Resets in ${timeStr}`);
+}
+
+function resolveTaskTelemetry(task, telemetry) {
+  if (task?.telemetry && typeof task.telemetry === 'object') {
+    return task.telemetry;
+  }
+  const convs = telemetry?.conversations;
+  if (!convs || typeof convs !== 'object') return null;
+  if (task?.convId && convs[task.convId]) {
+    return convs[task.convId];
+  }
+  if (task?.isActive && telemetry?.activeConvId && convs[telemetry.activeConvId]) {
+    return convs[telemetry.activeConvId];
+  }
+  return null;
+}
+
+function aggregateTelemetry(instances) {
+  let bestFetchedAt = 0;
+  let sourceMode = 'passive';
+  let activeConvId = null;
+  let geminiPool = null;
+  let geminiFetchedAt = -1;
+  let premiumPool = null;
+  let premiumFetchedAt = -1;
+  const mergedConversations = {};
+  const convMeta = new Map();
+
+  for (const inst of instances) {
+    const tel = inst?.resp?.telemetry;
+    if (!tel || typeof tel !== 'object') continue;
+    const fetchedAt = Number(tel.fetchedAt) || 0;
+    if (fetchedAt > bestFetchedAt) bestFetchedAt = fetchedAt;
+    if (tel.sourceMode === 'rpc_assisted') sourceMode = 'rpc_assisted';
+    if (!activeConvId && tel.activeConvId) activeConvId = tel.activeConvId;
+
+    const pools = tel.quotaPools;
+    if (pools && typeof pools === 'object') {
+      if (
+        pools.gemini &&
+        typeof pools.gemini.remainingFraction === 'number' &&
+        (!geminiPool || fetchedAt >= geminiFetchedAt)
+      ) {
+        geminiPool = pools.gemini;
+        geminiFetchedAt = fetchedAt;
+      }
+      if (
+        pools.premium &&
+        typeof pools.premium.remainingFraction === 'number' &&
+        (!premiumPool || fetchedAt >= premiumFetchedAt)
+      ) {
+        premiumPool = pools.premium;
+        premiumFetchedAt = fetchedAt;
+      }
+    }
+
+    const convs = tel.conversations;
+    if (convs && typeof convs === 'object') {
+      for (const [convId, conv] of Object.entries(convs)) {
+        if (!conv || typeof conv !== 'object') continue;
+        const prev = convMeta.get(convId);
+        const isExact = conv.precision === 'exact';
+        const prevExact = prev ? prev.precision === 'exact' : false;
+        if (
+          !prev ||
+          (isExact && !prevExact) ||
+          (isExact === prevExact && fetchedAt >= prev.fetchedAt)
+        ) {
+          mergedConversations[convId] = conv;
+          convMeta.set(convId, { precision: conv.precision, fetchedAt });
+        }
+      }
+    }
+  }
+
+  if (!geminiPool && !premiumPool && Object.keys(mergedConversations).length === 0) {
+    return null;
+  }
+
+  return {
+    fetchedAt: bestFetchedAt || Date.now(),
+    sourceMode,
+    quotaPools: {
+      gemini: geminiPool,
+      premium: premiumPool
+    },
+    activeConvId,
+    conversations: mergedConversations
+  };
+}
+
+function hideQuotaStrip() {
+  if (!quotaStrip) return;
+  if (lastQuotaDigest !== 'hidden') {
+    lastQuotaDigest = 'hidden';
+    quotaStrip.classList.add('hidden');
+    quotaStrip.textContent = '';
+  }
+}
+
+function renderQuotaStrip(telemetry) {
+  if (!quotaStrip) return;
+  if (!currentShowQuotaMetrics || !telemetry?.quotaPools) {
+    hideQuotaStrip();
+    return;
+  }
+
+  const rawPools = telemetry.quotaPools;
+  const entries = [];
+  if (
+    rawPools.gemini &&
+    typeof rawPools.gemini.remainingFraction === 'number' &&
+    Number.isFinite(rawPools.gemini.remainingFraction)
+  ) {
+    entries.push({
+      key: 'gemini',
+      label: t('quotaPoolGemini', {}, 'Gemini'),
+      pool: rawPools.gemini
+    });
+  }
+  if (
+    rawPools.premium &&
+    typeof rawPools.premium.remainingFraction === 'number' &&
+    Number.isFinite(rawPools.premium.remainingFraction)
+  ) {
+    entries.push({
+      key: 'premium',
+      label: t('quotaPoolPremium', {}, 'Claude / GPT'),
+      pool: rawPools.premium
+    });
+  }
+
+  if (entries.length === 0) {
+    hideQuotaStrip();
+    return;
+  }
+
+  const normalized = entries.map(({ key, label, pool }) => {
+    const frac = Math.max(0, Math.min(1, Number(pool.remainingFraction)));
+    const remainPct = Math.round(frac * 100);
+    const healthClass = remainPct <= 20 ? 'is-danger' : remainPct <= 50 ? 'is-warn' : '';
+    const resetText = formatQuotaReset(pool.resetTimeMs);
+    const metaText = resetText ? `${remainPct}% · ${resetText}` : `${remainPct}%`;
+    return {
+      key,
+      label,
+      remainPct,
+      healthClass,
+      metaText,
+      sampleLabel: typeof pool.sampleLabel === 'string' ? pool.sampleLabel : ''
+    };
+  });
+
+  const digest = JSON.stringify(normalized);
+  if (digest === lastQuotaDigest) return;
+  lastQuotaDigest = digest;
+
+  quotaStrip.textContent = '';
+  quotaStrip.classList.remove('hidden');
+
+  for (const item of normalized) {
+    const itemEl = document.createElement('div');
+    itemEl.className = 'quota-item';
+    if (item.sampleLabel) {
+      itemEl.title = item.sampleLabel;
+    }
+
+    const headEl = document.createElement('div');
+    headEl.className = 'quota-head';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'quota-label';
+    labelEl.textContent = item.label;
+
+    const metaEl = document.createElement('span');
+    metaEl.className = item.healthClass ? `quota-meta ${item.healthClass}` : 'quota-meta';
+    metaEl.textContent = item.metaText;
+
+    headEl.appendChild(labelEl);
+    headEl.appendChild(metaEl);
+
+    const progressEl = document.createElement('progress');
+    progressEl.className = item.healthClass ? `quota-progress ${item.healthClass}` : 'quota-progress';
+    progressEl.max = 100;
+    progressEl.value = item.remainPct;
+    progressEl.setAttribute('aria-label', `${item.label}: ${item.metaText}`);
+
+    itemEl.appendChild(headEl);
+    itemEl.appendChild(progressEl);
+    quotaStrip.appendChild(itemEl);
+  }
+}
+
+function syncLocalhostBtnUI(granted) {
+  localhostGranted = Boolean(granted);
+  if (!localhostAccessBtn) return;
+  localhostAccessBtn.textContent = localhostGranted
+    ? t('localhostRevokeBtn', {}, 'Revoke')
+    : t('localhostGrantBtn', {}, 'Enable');
+  localhostAccessBtn.setAttribute('aria-pressed', String(localhostGranted));
+}
+
+async function refreshLocalhostPermissionState() {
+  try {
+    if (!chrome.permissions || typeof chrome.permissions.contains !== 'function') return;
+    const granted = await chrome.permissions.contains({ origins: LOCALHOST_ORIGINS });
+    syncLocalhostBtnUI(granted);
+  } catch {}
+}
+
 function buildSingleInstanceResponse(inst) {
   const resp = inst.resp;
   const projects = Array.isArray(resp.projects)
@@ -289,9 +549,22 @@ function buildAggregatedResponse(instances) {
     counts.running += Number(c.running) || 0;
     counts.total += Number(c.total) || 0;
 
+    const instTel = r.telemetry;
+    const instConvs = instTel?.conversations;
     for (const p of r.projects || []) {
+      const enrichedTasks = Array.isArray(p.tasks)
+        ? p.tasks.map((task) => {
+            if (task?.telemetry) return task;
+            const resolved =
+              (task?.convId && instConvs?.[task.convId]) ||
+              (task?.isActive && instTel?.activeConvId && instConvs?.[instTel.activeConvId]) ||
+              null;
+            return resolved ? { ...task, telemetry: resolved } : task;
+          })
+        : [];
       mergedProjects.push({
         ...p,
+        tasks: enrichedTasks,
         sourceTabId: inst.tabId,
         sourceWindowId: inst.windowId,
         instanceLabel: inst.label
@@ -350,6 +623,7 @@ function buildAggregatedResponse(instances) {
     state: previewState || bestState,
     counts,
     projects: mergedProjects,
+    telemetry: aggregateTelemetry(instances),
     reason,
     previewState
   };
@@ -462,6 +736,7 @@ function renderInstanceBar() {
     selectedInstanceKey = nextKey;
     hasUserSelectedInstance = true;
     lastRenderedDigest = '';
+    lastQuotaDigest = '';
     renderInstanceBar();
     if (selectedInstanceKey === 'all') {
       renderStatusUI(buildAggregatedResponse(liveInstances));
@@ -577,26 +852,61 @@ function focusSidebarItem(taskId, projectName = '', taskTitle = '', sourceTabId 
   }
 }
 
-function renderProjectsTree(projects) {
+function renderProjectsTree(projects, telemetry = null) {
   const safeProjects = Array.isArray(projects) ? projects : [];
   const filteredProjects = safeProjects
-    .map((p) => ({
-      projectName: p.projectName,
-      projectType: p.projectType || 'local',
-      headerTaskId: p.headerTaskId || '',
-      isCollapsed: Boolean(p.isCollapsed),
-      knownEmpty: Boolean(p.knownEmpty),
-      sourceTabId: typeof p.sourceTabId === 'number' ? p.sourceTabId : null,
-      sourceWindowId: typeof p.sourceWindowId === 'number' ? p.sourceWindowId : null,
-      instanceLabel: p.instanceLabel || '',
-      tasks:
+    .map((p) => {
+      const visibleTasks =
         currentFilter === 'active'
           ? (p.tasks || []).filter((task) => task.state !== 'idle')
-          : p.tasks || []
-    }))
+          : p.tasks || [];
+      return {
+        projectName: p.projectName,
+        projectType: p.projectType || 'local',
+        headerTaskId: p.headerTaskId || '',
+        isCollapsed: Boolean(p.isCollapsed),
+        knownEmpty: Boolean(p.knownEmpty),
+        sourceTabId: typeof p.sourceTabId === 'number' ? p.sourceTabId : null,
+        sourceWindowId: typeof p.sourceWindowId === 'number' ? p.sourceWindowId : null,
+        instanceLabel: p.instanceLabel || '',
+        tasks: visibleTasks.map((task) => {
+          const convTel = currentShowContextMetrics ? resolveTaskTelemetry(task, telemetry) : null;
+          return {
+            ...task,
+            _resolvedTel:
+              convTel && Number(convTel.contextUsed) > 0
+                ? {
+                    contextUsed: Number(convTel.contextUsed) || 0,
+                    contextLimit: Number(convTel.contextLimit) || 256000,
+                    usagePercent:
+                      typeof convTel.usagePercent === 'number' && Number.isFinite(convTel.usagePercent)
+                        ? Math.round(convTel.usagePercent)
+                        : Math.round(
+                            ((Number(convTel.contextUsed) || 0) /
+                              Math.max(1, Number(convTel.contextLimit) || 256000)) *
+                              100
+                          ),
+                    precision: convTel.precision === 'exact' ? 'exact' : 'estimated',
+                    tokPerSec: Number(convTel.tokPerSec) || 0,
+                    compressionDetected: Boolean(convTel.compressionDetected),
+                    compressionDrop: Number(convTel.compressionDrop) || 0,
+                    cacheReadTokens: Number(convTel.cacheReadTokens) || 0,
+                    inputTokens: Number(convTel.inputTokens) || 0,
+                    outputTokens: Number(convTel.outputTokens) || 0,
+                    cacheHitRate: Number(convTel.cacheHitRate) || 0
+                  }
+                : null
+          };
+        })
+      };
+    })
     .filter((p) => (currentFilter === 'active' ? p.tasks.length > 0 : true));
 
-  const digest = JSON.stringify({ filter: currentFilter, list: filteredProjects });
+  const digest = JSON.stringify({
+    filter: currentFilter,
+    showContextMetrics: currentShowContextMetrics,
+    list: filteredProjects
+  });
   if (digest === lastRenderedDigest) return;
   lastRenderedDigest = digest;
 
@@ -694,8 +1004,28 @@ function renderProjectsTree(projects) {
         const rowBtn = document.createElement('button');
         rowBtn.type = 'button';
         rowBtn.className = `task-row is-${task.state}`;
-        if (task.reason) {
+
+        const convTel = task._resolvedTel;
+        const exactLine =
+          convTel && convTel.precision === 'exact'
+            ? t(
+                'ctxExactBreakdown',
+                {
+                  cache: formatTokenCount(convTel.cacheReadTokens),
+                  input: formatTokenCount(convTel.inputTokens),
+                  output: formatTokenCount(convTel.outputTokens),
+                  hit: Math.round(convTel.cacheHitRate)
+                },
+                `Cache ${formatTokenCount(convTel.cacheReadTokens)} · In ${formatTokenCount(convTel.inputTokens)} · Out ${formatTokenCount(convTel.outputTokens)} (${Math.round(convTel.cacheHitRate)}% hit)`
+              )
+            : '';
+
+        if (task.reason && exactLine) {
+          rowBtn.title = `${proj.projectName} › ${task.title}\n${task.reason}\n${exactLine}`;
+        } else if (task.reason) {
           rowBtn.title = `${proj.projectName} › ${task.title}\n${task.reason}`;
+        } else if (exactLine) {
+          rowBtn.title = `${proj.projectName} › ${task.title}\n${exactLine}`;
         }
 
         const leftWrap = document.createElement('span');
@@ -743,6 +1073,45 @@ function renderProjectsTree(projects) {
           )
         );
         itemLi.appendChild(rowBtn);
+
+        if (convTel) {
+          const telRow = document.createElement('div');
+          telRow.className = 'task-telemetry-row';
+
+          const ctxChip = document.createElement('span');
+          const pct = Math.max(0, convTel.usagePercent);
+          ctxChip.className =
+            pct >= 80 ? 'ctx-chip danger' : pct >= 50 ? 'ctx-chip warn' : 'ctx-chip';
+          const estPrefix = convTel.precision === 'exact' ? '' : '~';
+          ctxChip.textContent = `${estPrefix}${formatTokenCount(convTel.contextUsed)}/${formatTokenCount(convTel.contextLimit)} (${pct}%)`;
+          telRow.appendChild(ctxChip);
+
+          if (convTel.tokPerSec > 0) {
+            const speedStr =
+              convTel.tokPerSec >= 10
+                ? String(Math.round(convTel.tokPerSec))
+                : convTel.tokPerSec.toFixed(1).replace(/\.0$/, '');
+            if (Number(speedStr) > 0) {
+              const speedChip = document.createElement('span');
+              speedChip.className = 'speed-chip';
+              speedChip.textContent = t('ctxSpeedChip', { speed: speedStr }, `${speedStr} tok/s`);
+              telRow.appendChild(speedChip);
+            }
+          }
+
+          if (convTel.compressionDetected && convTel.compressionDrop > 0) {
+            const dropPct = Math.round(convTel.compressionDrop);
+            if (dropPct > 0) {
+              const compactChip = document.createElement('span');
+              compactChip.className = 'compact-chip';
+              compactChip.textContent = t('ctxCompactChip', { drop: dropPct }, `-${dropPct}%`);
+              telRow.appendChild(compactChip);
+            }
+          }
+
+          itemLi.appendChild(telRow);
+        }
+
         itemsWrap.appendChild(itemLi);
       }
 
@@ -781,6 +1150,8 @@ function renderStatusUI(resp) {
 
   pillTotal.textContent = t('pillTotal', { projects: projCount, tasks: counts.total }, `${projCount} projects · ${counts.total} chats`);
 
+  renderQuotaStrip(resp.telemetry || null);
+
   const showMarkRead = resp.enabled && (counts.unread > 0 || Boolean(resp.previewState));
   markAllReadBtn.classList.toggle('hidden', !showMarkRead);
 
@@ -791,7 +1162,7 @@ function renderStatusUI(resp) {
   });
 
   projectsSection.classList.remove('hidden');
-  renderProjectsTree(resp.projects);
+  renderProjectsTree(resp.projects, resp.telemetry || null);
 }
 
 function showNotAntigravityState() {
@@ -805,6 +1176,7 @@ function showNotAntigravityState() {
     'Open antigravity.google.com in any tab to monitor project status from anywhere.'
   );
   statPills.classList.add('hidden');
+  hideQuotaStrip();
   projectsSection.classList.add('hidden');
   markAllReadBtn.classList.add('hidden');
   actionBanner.classList.remove('hidden');
@@ -819,9 +1191,10 @@ function showNeedRefreshState() {
   statusReason.textContent = t(
     'needRefreshReason',
     {},
-    'Extension updated to v2.8. Refresh the Antigravity tab once to enable status lights.'
+    'Extension updated to v2.9. Refresh the Antigravity tab once to enable status lights.'
   );
   statPills.classList.add('hidden');
+  hideQuotaStrip();
   projectsSection.classList.add('hidden');
   markAllReadBtn.classList.add('hidden');
   actionBanner.classList.remove('hidden');
@@ -897,7 +1270,7 @@ async function refreshCurrentTabStatus() {
           state: normalizedState,
           resp
         });
-      } else if (isAntigravityUrl(tab.url || tab.pendingUrl || '')) {
+      } else if (resp == null && isAntigravityUrl(tab.url || tab.pendingUrl || '')) {
         nextStaleIds.push(tab.id);
       }
     }
@@ -986,6 +1359,9 @@ chrome.storage.sync.get(
     badgeSize: 'standard',
     actionClickMode: 'popup',
     autoProbeCollapsed: false,
+    showQuotaMetrics: true,
+    showContextMetrics: true,
+    showInPageCapsule: false,
     customWaitingSelector: '',
     customRunningSelector: ''
   },
@@ -993,6 +1369,12 @@ chrome.storage.sync.get(
     void chrome.runtime.lastError;
     const safeCfg = cfg || {};
     enabledToggle.checked = Boolean(safeCfg.enabled);
+    currentShowQuotaMetrics = safeCfg.showQuotaMetrics !== false;
+    currentShowContextMetrics = safeCfg.showContextMetrics !== false;
+    currentShowInPageCapsule = Boolean(safeCfg.showInPageCapsule);
+    if (showQuotaToggle) showQuotaToggle.checked = currentShowQuotaMetrics;
+    if (showContextToggle) showContextToggle.checked = currentShowContextMetrics;
+    if (showInPageCapsuleToggle) showInPageCapsuleToggle.checked = currentShowInPageCapsule;
     if (autoProbeCollapsedToggle) {
       autoProbeCollapsedToggle.checked = Boolean(safeCfg.autoProbeCollapsed);
     }
@@ -1005,6 +1387,9 @@ chrome.storage.sync.get(
     const nextClickMode = VALID_CLICK_MODES.has(safeCfg.actionClickMode) ? safeCfg.actionClickMode : 'popup';
     syncStyleControls(nextStyle, nextLayout, nextSize);
     syncActionClickControls(nextClickMode);
+    lastRenderedDigest = '';
+    lastQuotaDigest = '';
+    void refreshCurrentTabStatus();
   }
 );
 
@@ -1012,6 +1397,22 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'sync' || !changes) return;
   if ('enabled' in changes) {
     enabledToggle.checked = Boolean(changes.enabled.newValue);
+  }
+  if ('showQuotaMetrics' in changes) {
+    currentShowQuotaMetrics = changes.showQuotaMetrics.newValue !== false;
+    if (showQuotaToggle) showQuotaToggle.checked = currentShowQuotaMetrics;
+    lastQuotaDigest = '';
+    void refreshCurrentTabStatus();
+  }
+  if ('showContextMetrics' in changes) {
+    currentShowContextMetrics = changes.showContextMetrics.newValue !== false;
+    if (showContextToggle) showContextToggle.checked = currentShowContextMetrics;
+    lastRenderedDigest = '';
+    void refreshCurrentTabStatus();
+  }
+  if ('showInPageCapsule' in changes) {
+    currentShowInPageCapsule = Boolean(changes.showInPageCapsule.newValue);
+    if (showInPageCapsuleToggle) showInPageCapsuleToggle.checked = currentShowInPageCapsule;
   }
   if ('autoProbeCollapsed' in changes && autoProbeCollapsedToggle) {
     autoProbeCollapsedToggle.checked = Boolean(changes.autoProbeCollapsed.newValue);
@@ -1035,11 +1436,89 @@ enabledToggle.addEventListener('change', () => {
   });
 });
 
+if (showQuotaToggle) {
+  showQuotaToggle.addEventListener('change', () => {
+    currentShowQuotaMetrics = showQuotaToggle.checked;
+    lastQuotaDigest = '';
+    chrome.storage.sync.set({ showQuotaMetrics: currentShowQuotaMetrics }, () => {
+      void chrome.runtime.lastError;
+      void refreshCurrentTabStatus();
+    });
+  });
+}
+
+if (showContextToggle) {
+  showContextToggle.addEventListener('change', () => {
+    currentShowContextMetrics = showContextToggle.checked;
+    lastRenderedDigest = '';
+    chrome.storage.sync.set({ showContextMetrics: currentShowContextMetrics }, () => {
+      void chrome.runtime.lastError;
+      void refreshCurrentTabStatus();
+    });
+  });
+}
+
+if (showInPageCapsuleToggle) {
+  showInPageCapsuleToggle.addEventListener('change', () => {
+    currentShowInPageCapsule = showInPageCapsuleToggle.checked;
+    chrome.storage.sync.set({ showInPageCapsule: currentShowInPageCapsule }, () => {
+      void chrome.runtime.lastError;
+      void refreshCurrentTabStatus();
+    });
+  });
+}
+
 if (autoProbeCollapsedToggle) {
   autoProbeCollapsedToggle.addEventListener('change', () => {
     chrome.storage.sync.set({ autoProbeCollapsed: autoProbeCollapsedToggle.checked }, () => {
       void chrome.runtime.lastError;
     });
+  });
+}
+
+if (localhostAccessBtn) {
+  localhostAccessBtn.addEventListener('click', async () => {
+    if (!chrome.permissions) return;
+    if (!localhostGranted) {
+      const reqPromise = chrome.permissions.request({ origins: LOCALHOST_ORIGINS });
+      try {
+        const granted = await reqPromise;
+        syncLocalhostBtnUI(granted);
+        if (granted) {
+          chrome.runtime.sendMessage(
+            { type: 'SYNC_LOCALHOST_SCRIPTS', injectOpenTabs: true },
+            () => {
+              void chrome.runtime.lastError;
+            }
+          );
+          announceFeedback(t('localhostGrantedFeedback', {}, 'Localhost enabled'), 2200);
+          setTimeout(() => {
+            lastRenderedDigest = '';
+            lastQuotaDigest = '';
+            void refreshCurrentTabStatus();
+          }, 350);
+        }
+      } catch {}
+    } else {
+      try {
+        const removed = await chrome.permissions.remove({ origins: LOCALHOST_ORIGINS });
+        if (removed) {
+          syncLocalhostBtnUI(false);
+          chrome.runtime.sendMessage(
+            { type: 'SYNC_LOCALHOST_SCRIPTS', injectOpenTabs: false },
+            () => {
+              void chrome.runtime.lastError;
+            }
+          );
+          announceFeedback(t('localhostRevokedFeedback', {}, 'Localhost revoked'), 2200);
+          lastRenderedDigest = '';
+          lastQuotaDigest = '';
+          void refreshCurrentTabStatus();
+        } else {
+          await refreshLocalhostPermissionState();
+        }
+      } catch {}
+    }
   });
 }
 
@@ -1197,7 +1676,20 @@ try {
   chrome.windows?.onFocusChanged?.addListener(() => {
     void refreshCurrentTabStatus();
   });
+  chrome.permissions?.onAdded?.addListener(() => {
+    void refreshLocalhostPermissionState();
+    setTimeout(() => {
+      void refreshCurrentTabStatus();
+    }, 250);
+  });
+  chrome.permissions?.onRemoved?.addListener(() => {
+    void refreshLocalhostPermissionState();
+    lastRenderedDigest = '';
+    lastQuotaDigest = '';
+    void refreshCurrentTabStatus();
+  });
 } catch {}
 
+void refreshLocalhostPermissionState();
 refreshCurrentTabStatus();
 setInterval(refreshCurrentTabStatus, 1000);

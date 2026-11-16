@@ -1,19 +1,28 @@
 /**
- * Antigravity Tab Status - Background Service Worker (v2.8.0)
+ * Antigravity Tab Status - Background Service Worker (v2.9.0)
  *
  * 1. 在扩展后台使用 OffscreenCanvas 解码原站 Favicon 像素，零页面 CSP 消耗。
  * 2. 提供免 CSP、免后台标签页节流的 Port 计时器（动画帧驱动 + 1.5s 完成防抖）。
- * 3. 转发子工作区 iframe 的多项目状态同步与任务点击跳转指令。
+ * 3. 转发子工作区 iframe 的多项目状态与遥测同步及任务点击跳转指令。
  * 4. 在 chrome.storage.session 中汇总所有 Antigravity 标签页的全局角标计数。
  * 5. 动态同步工具栏图标点击模式（快捷弹窗 / 常驻 Side Panel）。
+ * 6. 按需动态注册并向已授权的 localhost / 127.0.0.1 本地工作区注入监测脚本。
  */
 
 const ALLOWED_FAVICON_HOST_RE = /(?:^|\.)(?:antigravity\.google(?:\.com)?|gstatic\.com)$/i;
 const ANTIGRAVITY_TAB_HOST_RE = /(?:^|\.)antigravity\.google(?:\.com)?$/i;
+const LOCALHOST_ORIGINS = ['http://localhost/*', 'http://127.0.0.1/*'];
+const LOCALHOST_SCRIPT_IDS = ['agy-local-main', 'agy-local-top', 'agy-local-child'];
 const SESSION_BADGE_KEY = 'agyTabBadges';
 
 let memoryBadgeFallback = {};
 let badgeSyncLock = Promise.resolve();
+let localhostSyncLock = Promise.resolve();
+
+function isLocalhostHostname(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1';
+}
 
 function isAllowedFaviconUrl(rawUrl) {
   if (typeof rawUrl !== 'string' || rawUrl.length === 0 || rawUrl.length > 4096) {
@@ -24,7 +33,10 @@ function isAllowedFaviconUrl(rawUrl) {
   }
   try {
     const parsed = new URL(rawUrl);
-    return parsed.protocol === 'https:' && ALLOWED_FAVICON_HOST_RE.test(parsed.hostname);
+    if (parsed.protocol === 'https:' && ALLOWED_FAVICON_HOST_RE.test(parsed.hostname)) {
+      return true;
+    }
+    return parsed.protocol === 'http:' && isLocalhostHostname(parsed.hostname);
   } catch {
     return false;
   }
@@ -34,9 +46,120 @@ function isAntigravityUrl(rawUrl) {
   if (typeof rawUrl !== 'string' || !rawUrl) return false;
   try {
     const parsed = new URL(rawUrl);
-    return parsed.protocol === 'https:' && ANTIGRAVITY_TAB_HOST_RE.test(parsed.hostname);
+    if (parsed.protocol === 'https:') {
+      return ANTIGRAVITY_TAB_HOST_RE.test(parsed.hostname);
+    }
+    if (parsed.protocol === 'http:') {
+      return isLocalhostHostname(parsed.hostname);
+    }
+    return false;
   } catch {
     return false;
+  }
+}
+
+async function hasLocalhostPermission() {
+  try {
+    if (!chrome.permissions?.contains) return false;
+    return Boolean(await chrome.permissions.contains({ origins: LOCALHOST_ORIGINS }));
+  } catch {
+    return false;
+  }
+}
+
+async function syncLocalhostContentScripts() {
+  const previousLock = localhostSyncLock;
+  let releaseLock;
+  localhostSyncLock = new Promise((resolve) => {
+    releaseLock = resolve;
+  });
+
+  try {
+    await previousLock;
+    const granted = await hasLocalhostPermission();
+    if (!chrome.scripting?.getRegisteredContentScripts) {
+      return granted;
+    }
+
+    const existing = await chrome.scripting.getRegisteredContentScripts({
+      ids: LOCALHOST_SCRIPT_IDS
+    });
+    const existingIds = Array.isArray(existing)
+      ? existing.map((s) => s.id).filter(Boolean)
+      : [];
+
+    if (existingIds.length > 0) {
+      await chrome.scripting.unregisterContentScripts({ ids: existingIds });
+    }
+
+    if (!granted) {
+      return false;
+    }
+
+    await chrome.scripting.registerContentScripts([
+      {
+        id: 'agy-local-main',
+        matches: LOCALHOST_ORIGINS,
+        js: ['page-bridge.js'],
+        world: 'MAIN',
+        allFrames: true,
+        matchOriginAsFallback: true,
+        runAt: 'document_start'
+      },
+      {
+        id: 'agy-local-top',
+        matches: LOCALHOST_ORIGINS,
+        js: ['i18n.js', 'scanner.js', 'content.js'],
+        allFrames: false,
+        runAt: 'document_idle'
+      },
+      {
+        id: 'agy-local-child',
+        matches: LOCALHOST_ORIGINS,
+        js: ['i18n.js', 'scanner.js', 'frame-detector.js'],
+        allFrames: true,
+        matchOriginAsFallback: true,
+        runAt: 'document_idle'
+      }
+    ]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    releaseLock();
+  }
+}
+
+async function injectLocalhostOpenTabs() {
+  if (!chrome.tabs?.query || !chrome.scripting?.executeScript) return;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: LOCALHOST_ORIGINS });
+  } catch {
+    return;
+  }
+
+  for (const tab of tabs || []) {
+    if (!tab || typeof tab.id !== 'number') continue;
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ['page-bridge.js'],
+        world: 'MAIN'
+      });
+    } catch {}
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [0] },
+        files: ['i18n.js', 'scanner.js', 'content.js']
+      });
+    } catch {}
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ['i18n.js', 'scanner.js', 'frame-detector.js']
+      });
+    } catch {}
   }
 }
 
@@ -165,13 +288,28 @@ async function enqueueBadgeSync(mutatorFn) {
 
 chrome.runtime.onInstalled.addListener(() => {
   void syncActionClickBehavior();
+  void syncLocalhostContentScripts();
   void enqueueBadgeSync(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void syncActionClickBehavior();
+  void syncLocalhostContentScripts();
   void enqueueBadgeSync(() => {});
 });
+
+if (chrome.permissions?.onAdded) {
+  chrome.permissions.onAdded.addListener(() => {
+    void syncLocalhostContentScripts();
+  });
+}
+
+if (chrome.permissions?.onRemoved) {
+  chrome.permissions.onRemoved.addListener(() => {
+    void syncLocalhostContentScripts();
+    void enqueueBadgeSync(() => {});
+  });
+}
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === 'sync' && changes && 'actionClickMode' in changes) {
@@ -197,6 +335,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 void syncActionClickBehavior();
+void syncLocalhostContentScripts();
 void enqueueBadgeSync(() => {});
 
 // 1. 免页面 CSP、免后台标签页节流的后台计时器通道
@@ -267,6 +406,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'SYNC_LOCALHOST_SCRIPTS') {
+    (async () => {
+      try {
+        const granted = await syncLocalhostContentScripts();
+        if (granted && message.injectOpenTabs) {
+          await injectLocalhostOpenTabs();
+        }
+        sendResponse({ ok: true, granted });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          granted: false,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+    })();
+    return true;
+  }
+
   // 2. 子工作区 iframe 全量同步至顶层页面 (frameId: 0)
   if (message.type === 'CHILD_FRAME_SYNC' && sender?.tab?.id && sender.frameId > 0) {
     chrome.tabs.sendMessage(
@@ -275,7 +433,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         type: 'RELAYED_CHILD_SYNC',
         frameKey: message.frameUid || `frame-${sender.frameId}`,
         activePane: message.activePane,
-        projects: message.projects
+        projects: message.projects,
+        telemetry: message.telemetry || null
       },
       { frameId: 0 },
       () => {
@@ -404,6 +563,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       : 64;
     (async () => {
       try {
+        if (message.url.startsWith('http://') && !(await hasLocalhostPermission())) {
+          sendResponse({ ok: false, error: 'Localhost permission not granted' });
+          return;
+        }
         const response = await fetch(message.url, {
           credentials: 'omit',
           cache: 'force-cache'

@@ -1,5 +1,5 @@
 /**
- * Antigravity Tab Status - Unified Sidebar Projects & Active Pane Scanner (v2.7.0)
+ * Antigravity Tab Status - Unified Sidebar Projects & Active Pane Scanner (v2.9.0)
  *
  * 针对真实 Antigravity 工作区侧边栏结构与「折叠项目」深度校准：
  * - 严格限定采集左侧 `Projects` 下方至 `Settings` / 实例切换器上方的当前实例项目
@@ -7,24 +7,50 @@
  *   1) 通过 `page-bridge.js` (`world: "MAIN"`) 从 React Fiber / QueryCache / 网络流直接提取已折叠项目的对话与实时状态
  *   2) 展开态记忆缓存：用户展开过再折叠时完整保留对话列表与已知状态
  *   3) 懒加载项目一次性静默展开快照探测（自动展开采集后立即恢复折叠）及手动「同步折叠」按钮
+ * - 可选 Shadow DOM 对话框上下文胶囊（默认关闭，遵守 WCAG 1.4.13、reduced-motion 与 forced-colors）
  */
 
 (() => {
   const isTop = window.top === window.self;
   const AGY_HOST_RE = /^(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
   const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
+  const LOCAL_HOST_RE = /^(?:localhost|127\.0\.0\.1)$/i;
+  const LOCAL_ORIGIN_RE = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
 
+  let isLocalContext = false;
   if (isTop) {
-    if (!AGY_HOST_RE.test(window.location.hostname || '')) return;
+    const officialOk = AGY_HOST_RE.test(window.location.hostname || '');
+    const localOk =
+      window.location.protocol === 'http:' && LOCAL_HOST_RE.test(window.location.hostname || '');
+    if (!officialOk && !localOk) return;
+    isLocalContext = localOk && !officialOk;
   } else {
     const origins = window.location.ancestorOrigins;
     if (!origins || origins.length === 0) return;
     const topOrigin = origins[origins.length - 1] || '';
-    if (!AGY_ORIGIN_RE.test(topOrigin)) return;
+    const officialOk = AGY_ORIGIN_RE.test(topOrigin);
+    const localOk = LOCAL_ORIGIN_RE.test(topOrigin);
+    if (!officialOk && !localOk) return;
+    isLocalContext = localOk && !officialOk;
   }
 
   if (window.__AGY_SCANNER_V22__) return;
   window.__AGY_SCANNER_V22__ = true;
+
+  function isLocalAntigravityConfirmed() {
+    if (!isLocalContext) return true;
+    try {
+      if (document.documentElement?.hasAttribute('data-agy-local-host')) return true;
+      if (
+        document.querySelector(
+          '.agy-composer-footer, button[data-testid="permissions-selector-trigger"]'
+        )
+      ) {
+        return true;
+      }
+    } catch {}
+    return false;
+  }
 
   function t(key, vars = {}, fallback = '') {
     try {
@@ -1636,9 +1662,37 @@
     return `item:${projectName}::${title}::${indexInProject}`;
   }
 
+  function extractConvIdFromTaskId(taskId) {
+    if (typeof taskId !== 'string' || !taskId) return '';
+    try {
+      const decoded = decodeURIComponent(taskId);
+      const m = decoded.match(/(?:^|[/?=&#])c\/([a-zA-Z0-9_-]{6,})/i);
+      if (m) return m[1];
+    } catch {}
+    const rawMatch = taskId.match(/(?:^|[/?=&#])c\/([a-zA-Z0-9_-]{6,})/i);
+    return rawMatch ? rawMatch[1] : '';
+  }
+
+  function resolveTaskTelemetry(taskId, isActive, matchedBridgeTask = null) {
+    const convId =
+      (matchedBridgeTask && typeof matchedBridgeTask.convId === 'string' && matchedBridgeTask.convId) ||
+      extractConvIdFromTaskId(taskId) ||
+      (isActive && lastBridgeTelemetry?.activeConvId ? String(lastBridgeTelemetry.activeConvId) : '') ||
+      '';
+    const convMap = lastBridgeTelemetry?.conversations;
+    const telemetry =
+      (convId && convMap && typeof convMap === 'object' && convMap[convId]) ||
+      (matchedBridgeTask && matchedBridgeTask.telemetry) ||
+      null;
+    return { convId, telemetry };
+  }
+
   function scanSidebarProjects(activePaneResult) {
     const scope = findSidebarScope();
-    if (!scope) return [];
+    if (!scope) {
+      queryMainWorldBridge([]);
+      return [];
+    }
 
     const breadcrumb = detectMainPaneBreadcrumb();
     const rawRowEls = collectSidebarRowElements(scope);
@@ -1660,7 +1714,10 @@
       });
     }
 
-    if (extracted.length === 0) return [];
+    if (extracted.length === 0) {
+      queryMainWorldBridge([]);
+      return [];
+    }
 
     // 清理上一轮扫描残留的项目头与归属项目标记
     for (const oldEl of document.querySelectorAll('[data-agy-proj-name], [data-agy-parent-proj]')) {
@@ -1705,7 +1762,10 @@
       });
     }
 
-    if (parsedRows.length === 0) return [];
+    if (parsedRows.length === 0) {
+      queryMainWorldBridge([]);
+      return [];
+    }
 
     // 若没有任何对话行通过 aria/href 命中 isActive，利用主面板顶部面包屑或唯一选中边框精准标记「当前」对话
     if (!parsedRows.some((r) => r.role === 'task' && r.isActive)) {
@@ -1895,10 +1955,16 @@
                 domTask.reason = resolveBridgeReason(matched) || domTask.reason;
               }
             }
+            const resolved = resolveTaskTelemetry(domTask.taskId, domTask.isActive, matched);
+            domTask.convId = resolved.convId;
+            domTask.telemetry = resolved.telemetry;
             delete domTask.hasStaticRightStatusIcon;
           }
         } else {
           for (const domTask of proj.tasks) {
+            const resolved = resolveTaskTelemetry(domTask.taskId, domTask.isActive, null);
+            domTask.convId = resolved.convId;
+            domTask.telemetry = resolved.telemetry;
             delete domTask.hasStaticRightStatusIcon;
           }
         }
@@ -1931,14 +1997,18 @@
                 st = 'idle';
               }
             }
+            const taskId = bt.taskId || `item:${proj.projectName}::${bt.title}::${idx}`;
+            const resolved = resolveTaskTelemetry(taskId, isBcActive, bt);
             return {
-              taskId: bt.taskId || `item:${proj.projectName}::${bt.title}::${idx}`,
+              taskId,
+              convId: resolved.convId,
               title: bt.title,
               state: st,
               confirmedRunning: Boolean(st === 'running' && bt.confirmedDetail),
               reason: rsn,
               timeText: bt.timeText || '',
-              isActive: isBcActive
+              isActive: isBcActive,
+              telemetry: resolved.telemetry
             };
           });
           frameCollapsedCache.set(proj.projectName, {
@@ -1977,7 +2047,15 @@
                   rsn = activePaneResult.reason;
                 }
               }
-              return { ...ct, isActive: isBcActive, state: st, reason: rsn };
+              const resolved = resolveTaskTelemetry(ct.taskId, isBcActive, ct);
+              return {
+                ...ct,
+                convId: resolved.convId || ct.convId || '',
+                telemetry: resolved.telemetry || ct.telemetry || null,
+                isActive: isBcActive,
+                state: st,
+                reason: rsn
+              };
             });
           } else if (cached.knownEmpty) {
             // 已确认过是空项目（No conversations yet），标记无需显示「已折叠未知」
@@ -2021,6 +2099,7 @@
             projects.find((p) => p.projectName.toLowerCase() === breadcrumb.projectName.toLowerCase())) ||
           projects[0];
 
+        const activeMeta = resolveTaskTelemetry('active-open-pane', true, null);
         if (!targetProj) {
           projects.push({
             projectName: breadcrumb?.projectName || t('fallbackWorkspaceName', {}, 'Current Workspace'),
@@ -2029,22 +2108,26 @@
             tasks: [
               {
                 taskId: 'active-open-pane',
+                convId: activeMeta.convId,
                 title: breadcrumb?.conversationTitle || t('fallbackOpenConvTitle', {}, 'Open Conversation'),
                 state: activePaneResult.state,
                 reason: activePaneResult.reason,
                 timeText: t('taskCurrentTag', {}, 'Current'),
-                isActive: true
+                isActive: true,
+                telemetry: activeMeta.telemetry
               }
             ]
           });
         } else {
           targetProj.tasks.unshift({
             taskId: 'active-open-pane',
+            convId: activeMeta.convId,
             title: breadcrumb?.conversationTitle || t('fallbackOpenConvTitle', {}, 'Open Conversation'),
             state: activePaneResult.state,
             reason: activePaneResult.reason,
             timeText: t('taskCurrentTag', {}, 'Current'),
-            isActive: true
+            isActive: true,
+            telemetry: activeMeta.telemetry
           });
         }
       }
@@ -2063,13 +2146,15 @@
   let autoProbeTimer = null;
   const probeListeners = new Set();
   let lastBridgeDiagnostics = [];
+  let lastBridgeTelemetry = null;
 
   function queryMainWorldBridge(projectNames) {
-    if (!projectNames || projectNames.length === 0 || !document.documentElement) return null;
+    if (!document.documentElement) return null;
+    const safeNames = Array.isArray(projectNames) ? projectNames : [];
     try {
       const rootEl = document.documentElement;
       rootEl.removeAttribute('data-agy-bridge-out');
-      rootEl.setAttribute('data-agy-bridge-in', JSON.stringify(projectNames));
+      rootEl.setAttribute('data-agy-bridge-in', JSON.stringify(safeNames));
       window.dispatchEvent(new CustomEvent('__AGY_BRIDGE_REQ__'));
       const rawOut = rootEl.getAttribute('data-agy-bridge-out');
       rootEl.removeAttribute('data-agy-bridge-in');
@@ -2078,7 +2163,9 @@
       const parsed = JSON.parse(rawOut);
       if (parsed && parsed.ok) {
         lastBridgeDiagnostics = Array.isArray(parsed.diagnostics) ? parsed.diagnostics : [];
-        return parsed.projects;
+        lastBridgeTelemetry =
+          parsed.telemetry && typeof parsed.telemetry === 'object' ? parsed.telemetry : null;
+        return parsed.projects || {};
       }
       return null;
     } catch {
@@ -2107,7 +2194,9 @@
   }
 
   async function probeCollapsedProjects(forceAll = false, targetSubset = null) {
-    if (isProbingCollapsed || !document.body) return false;
+    if ((isLocalContext && !isLocalAntigravityConfirmed()) || isProbingCollapsed || !document.body) {
+      return false;
+    }
     const scope = findSidebarScope();
     if (!scope) return false;
 
@@ -2202,11 +2291,14 @@
   }
 
   function scanWorkspace() {
+    if (isLocalContext && !isLocalAntigravityConfirmed()) {
+      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
+    }
     if (!isTop && (window.innerWidth < 60 || window.innerHeight < 60 || !document.body)) {
-      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [] };
+      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
     }
     if (!isTop && document.getElementById('tabCanvas') && document.getElementById('zoomCanvas')) {
-      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [] };
+      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
     }
 
     const activePane = detectActivePaneState();
@@ -2214,7 +2306,8 @@
     return {
       ignore: false,
       activePane,
-      projects
+      projects,
+      telemetry: lastBridgeTelemetry
     };
   }
 
@@ -2248,7 +2341,7 @@
   }
 
   function focusTaskById(taskId, projectName = '', taskTitle = '') {
-    if (!taskId || !document.body) return false;
+    if ((isLocalContext && !isLocalAntigravityConfirmed()) || !taskId || !document.body) return false;
     const directHit = findMountedTaskRow(taskId, taskTitle);
     if (directHit) {
       clickRowElement(directHit);
@@ -2285,8 +2378,905 @@
 
   function scanDiagnostics() {
     return {
-      bridgeConversations: Array.isArray(lastBridgeDiagnostics) ? lastBridgeDiagnostics : []
+      bridgeConversations: Array.isArray(lastBridgeDiagnostics) ? lastBridgeDiagnostics : [],
+      telemetry: lastBridgeTelemetry
     };
+  }
+
+  // ============================================================================
+  // 5. 可选 Shadow DOM 对话框上下文胶囊（默认关闭）
+  // ============================================================================
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const CAPSULE_HOST_ATTR = 'data-agy-capsule-host';
+  const capsuleStateMap = new WeakMap();
+  const openCapsuleStates = new Set();
+  let capsuleEscBound = false;
+
+  const CAPSULE_CSS = `
+:host {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  vertical-align: middle;
+  margin-inline-end: 6px;
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --cap-btn-bg: rgba(15, 23, 42, 0.06);
+  --cap-btn-hover-bg: rgba(15, 23, 42, 0.11);
+  --cap-btn-border: rgba(15, 23, 42, 0.18);
+  --cap-btn-text: #0f172a;
+  --cap-btn-muted: #475569;
+  --cap-tip-bg: #ffffff;
+  --cap-tip-border: rgba(15, 23, 42, 0.18);
+  --cap-tip-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+  --cap-tip-text: #0f172a;
+  --cap-tip-muted: #475569;
+  --cap-divider: rgba(15, 23, 42, 0.1);
+  --cap-track-bg: rgba(15, 23, 42, 0.12);
+  --cap-warn-bg: rgba(194, 108, 119, 0.14);
+  --cap-warn-text: #9f1239;
+  --cap-comp-bg: rgba(198, 162, 101, 0.16);
+  --cap-comp-text: #854d0e;
+  --cap-focus: #0284c7;
+  --cap-health: #5E9E8E;
+}
+@media (prefers-color-scheme: dark) {
+  :host {
+    --cap-btn-bg: rgba(148, 163, 184, 0.12);
+    --cap-btn-hover-bg: rgba(148, 163, 184, 0.2);
+    --cap-btn-border: rgba(148, 163, 184, 0.28);
+    --cap-btn-text: #f1f5f9;
+    --cap-btn-muted: #cbd5e1;
+    --cap-tip-bg: #161b26;
+    --cap-tip-border: rgba(148, 163, 184, 0.28);
+    --cap-tip-shadow: 0 12px 32px rgba(2, 6, 23, 0.55);
+    --cap-tip-text: #f8fafc;
+    --cap-tip-muted: #94a3b8;
+    --cap-divider: rgba(148, 163, 184, 0.16);
+    --cap-track-bg: rgba(148, 163, 184, 0.22);
+    --cap-warn-bg: rgba(194, 108, 119, 0.2);
+    --cap-warn-text: #fda4af;
+    --cap-comp-bg: rgba(198, 162, 101, 0.2);
+    --cap-comp-text: #fde68a;
+    --cap-focus: #38bdf8;
+  }
+}
+@supports (color: light-dark(white, black)) {
+  :host {
+    --cap-btn-bg: light-dark(rgba(15, 23, 42, 0.06), rgba(148, 163, 184, 0.12));
+    --cap-btn-hover-bg: light-dark(rgba(15, 23, 42, 0.11), rgba(148, 163, 184, 0.2));
+    --cap-btn-border: light-dark(rgba(15, 23, 42, 0.18), rgba(148, 163, 184, 0.28));
+    --cap-btn-text: light-dark(#0f172a, #f1f5f9);
+    --cap-btn-muted: light-dark(#475569, #cbd5e1);
+    --cap-tip-bg: light-dark(#ffffff, #161b26);
+    --cap-tip-border: light-dark(rgba(15, 23, 42, 0.18), rgba(148, 163, 184, 0.28));
+    --cap-tip-shadow: light-dark(0 10px 28px rgba(15, 23, 42, 0.16), 0 12px 32px rgba(2, 6, 23, 0.55));
+    --cap-tip-text: light-dark(#0f172a, #f8fafc);
+    --cap-tip-muted: light-dark(#475569, #94a3b8);
+    --cap-divider: light-dark(rgba(15, 23, 42, 0.1), rgba(148, 163, 184, 0.16));
+    --cap-track-bg: light-dark(rgba(15, 23, 42, 0.12), rgba(148, 163, 184, 0.22));
+    --cap-warn-bg: light-dark(rgba(194, 108, 119, 0.14), rgba(194, 108, 119, 0.2));
+    --cap-warn-text: light-dark(#9f1239, #fda4af);
+    --cap-comp-bg: light-dark(rgba(198, 162, 101, 0.16), rgba(198, 162, 101, 0.2));
+    --cap-comp-text: light-dark(#854d0e, #fde68a);
+    --cap-focus: light-dark(#0284c7, #38bdf8);
+  }
+}
+.capsule-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.capsule-wrap.is-healthy {
+  --cap-health: #5E9E8E;
+}
+.capsule-wrap.is-warn {
+  --cap-health: #C6A265;
+}
+.capsule-wrap.is-danger {
+  --cap-health: #C26C77;
+}
+.capsule-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-block-size: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--cap-btn-border);
+  background: var(--cap-btn-bg);
+  color: var(--cap-btn-text);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.capsule-btn:hover {
+  background: var(--cap-btn-hover-bg);
+}
+.capsule-btn:focus-visible {
+  outline: 2px solid var(--cap-focus);
+  outline-offset: 2px;
+}
+.bolt-svg {
+  flex: none;
+  color: var(--cap-health);
+}
+.cap-speed,
+.cap-ctx {
+  font-variant-numeric: tabular-nums;
+}
+.cap-sep {
+  color: var(--cap-btn-muted);
+  opacity: 0.7;
+}
+.gauge-svg {
+  flex: none;
+  display: block;
+}
+.gauge-track {
+  fill: var(--cap-track-bg);
+  stroke: var(--cap-btn-border);
+  stroke-width: 0.8;
+}
+.gauge-fill {
+  fill: var(--cap-health);
+  transition: width 160ms ease, fill 160ms ease;
+}
+.capsule-tip {
+  position: absolute;
+  inset-block-end: calc(100% + 6px);
+  inset-inline-end: 0;
+  z-index: 2147483000;
+  inline-size: max-content;
+  min-inline-size: 236px;
+  max-inline-size: 310px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--cap-tip-border);
+  background: var(--cap-tip-bg);
+  color: var(--cap-tip-text);
+  box-shadow: var(--cap-tip-shadow);
+  font-size: 11.5px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 130ms ease, visibility 130ms ease;
+}
+.capsule-tip::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  block-size: 10px;
+  inset-block-end: -10px;
+}
+.capsule-tip[data-place="below"] {
+  inset-block-end: auto;
+  inset-block-start: calc(100% + 6px);
+}
+.capsule-tip[data-place="below"]::after {
+  inset-block-end: auto;
+  inset-block-start: -10px;
+}
+.capsule-tip[data-align="left"] {
+  inset-inline-end: auto;
+  inset-inline-start: 0;
+}
+.capsule-tip[data-open="true"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+.tip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-block-end: 6px;
+}
+.tip-model {
+  font-weight: 600;
+  color: var(--cap-tip-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tip-used-badge {
+  flex: none;
+  font-weight: 600;
+  color: var(--cap-health);
+  font-variant-numeric: tabular-nums;
+}
+.tip-bar-track {
+  inline-size: 100%;
+  block-size: 5px;
+  border-radius: 999px;
+  background: var(--cap-track-bg);
+  overflow: hidden;
+  margin-block-end: 8px;
+}
+.tip-bar-fill {
+  block-size: 100%;
+  border-radius: 999px;
+  background: var(--cap-health);
+  transition: width 160ms ease, background-color 160ms ease;
+}
+.tip-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-block: 3px;
+}
+.tip-key {
+  color: var(--cap-tip-muted);
+}
+.tip-val {
+  font-weight: 500;
+  color: var(--cap-tip-text);
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+.tip-breakdown,
+.tip-est-notice {
+  margin-block-start: 4px;
+  padding-block-start: 4px;
+  border-block-start: 1px solid var(--cap-divider);
+  font-size: 11px;
+  color: var(--cap-tip-muted);
+  font-variant-numeric: tabular-nums;
+}
+.tip-compressed,
+.tip-warn {
+  margin-block-start: 6px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.tip-compressed {
+  background: var(--cap-comp-bg);
+  color: var(--cap-comp-text);
+}
+.tip-warn {
+  background: var(--cap-warn-bg);
+  color: var(--cap-warn-text);
+}
+.tip-quota-wrap {
+  margin-block-start: 6px;
+  padding-block-start: 5px;
+  border-block-start: 1px solid var(--cap-divider);
+}
+.tip-foot {
+  margin-block-start: 6px;
+  padding-block-start: 5px;
+  border-block-start: 1px solid var(--cap-divider);
+  font-size: 11px;
+  color: var(--cap-tip-muted);
+  font-variant-numeric: tabular-nums;
+}
+[hidden] {
+  display: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .capsule-btn,
+  .capsule-tip,
+  .tip-bar-fill,
+  .gauge-fill {
+    transition: none;
+    animation: none;
+  }
+}
+@media (forced-colors: active) {
+  .capsule-btn {
+    forced-color-adjust: auto;
+    background: ButtonFace;
+    color: ButtonText;
+    border-color: ButtonBorder;
+  }
+  .capsule-btn:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  .capsule-tip {
+    forced-color-adjust: auto;
+    background: Canvas;
+    color: CanvasText;
+    border: 1px solid ButtonBorder;
+    box-shadow: none;
+  }
+  .gauge-track {
+    fill: Canvas;
+    stroke: ButtonBorder;
+  }
+  .tip-bar-track {
+    background: Canvas;
+    border: 1px solid ButtonBorder;
+  }
+  .gauge-fill {
+    fill: Highlight;
+  }
+  .tip-bar-fill {
+    background: Highlight;
+  }
+  .bolt-svg {
+    color: CanvasText;
+  }
+  .tip-used-badge {
+    color: Highlight;
+  }
+}
+`;
+
+  function formatCapsuleTokens(raw) {
+    const n = Math.max(0, Number(raw) || 0);
+    if (n >= 1000000) {
+      return `${(n / 1000000).toFixed(1).replace(/\.0$/, '')}M`;
+    }
+    if (n >= 1000) {
+      return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+    }
+    return String(Math.round(n));
+  }
+
+  function formatCapsuleResetCountdown(resetTimeMs) {
+    const ms = Number(resetTimeMs);
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const diffMs = ms - Date.now();
+    if (diffMs <= 60000) {
+      return t('quotaResetsSoon', {}, 'Resets soon');
+    }
+    const totalMins = Math.ceil(diffMs / 60000);
+    const hrs = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    const timeStr = hrs > 0 ? (mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`) : `${mins}m`;
+    return t('quotaResetsIn', { time: timeStr }, `Resets in ${timeStr}`);
+  }
+
+  function createSvgEl(tag, attrs = {}) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      el.setAttribute(k, String(v));
+    }
+    return el;
+  }
+
+  function clearCapsuleHideTimer(state) {
+    if (state.hideTimer !== null) {
+      clearTimeout(state.hideTimer);
+      state.hideTimer = null;
+    }
+  }
+
+  function positionCapsuleTooltip(state) {
+    try {
+      const rect = state.btn.getBoundingClientRect();
+      if (rect.top < 240) {
+        state.tip.setAttribute('data-place', 'below');
+      } else {
+        state.tip.removeAttribute('data-place');
+      }
+      if (rect.right < 290) {
+        state.tip.setAttribute('data-align', 'left');
+      } else {
+        state.tip.removeAttribute('data-align');
+      }
+    } catch {}
+  }
+
+  function syncCapsuleTipVisibility(state) {
+    clearCapsuleHideTimer(state);
+    const shouldOpen = !state.dismissedByEsc && (state.hoverBtn || state.hoverTip || state.focused);
+    state.isOpen = shouldOpen;
+    if (shouldOpen) {
+      positionCapsuleTooltip(state);
+      state.tip.setAttribute('data-open', 'true');
+      openCapsuleStates.add(state);
+    } else {
+      state.tip.removeAttribute('data-open');
+      openCapsuleStates.delete(state);
+    }
+  }
+
+  function scheduleCapsuleTipHide(state) {
+    clearCapsuleHideTimer(state);
+    state.hideTimer = setTimeout(() => {
+      state.hideTimer = null;
+      syncCapsuleTipVisibility(state);
+    }, 120);
+  }
+
+  function createCapsuleRow(keyText = '') {
+    const row = document.createElement('div');
+    row.className = 'tip-row';
+    const keyEl = document.createElement('span');
+    keyEl.className = 'tip-key';
+    keyEl.textContent = keyText;
+    const valEl = document.createElement('span');
+    valEl.className = 'tip-val';
+    row.appendChild(keyEl);
+    row.appendChild(valEl);
+    return { row, keyEl, valEl };
+  }
+
+  function ensureCapsuleEscListener() {
+    if (capsuleEscBound) return;
+    capsuleEscBound = true;
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape' || openCapsuleStates.size === 0) return;
+      for (const st of Array.from(openCapsuleStates)) {
+        st.dismissedByEsc = true;
+        syncCapsuleTipVisibility(st);
+      }
+    });
+  }
+
+  function buildCapsuleInstance(host) {
+    ensureCapsuleEscListener();
+    const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
+    while (shadow.firstChild) {
+      shadow.removeChild(shadow.firstChild);
+    }
+
+    const styleEl = document.createElement('style');
+    styleEl.textContent = CAPSULE_CSS;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'capsule-wrap is-healthy';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'capsule-btn';
+    btn.setAttribute('aria-describedby', 'agy-cap-tip');
+
+    const boltSvg = createSvgEl('svg', {
+      class: 'bolt-svg',
+      width: '11',
+      height: '11',
+      viewBox: '0 0 16 16',
+      'aria-hidden': 'true'
+    });
+    boltSvg.appendChild(
+      createSvgEl('path', {
+        fill: 'currentColor',
+        d: 'M9.5 1.5L3.5 9h4l-1 5.5L12.5 7h-4l1-5.5Z'
+      })
+    );
+
+    const speedSpan = document.createElement('span');
+    speedSpan.className = 'cap-speed';
+    speedSpan.textContent = '-- tok/s';
+
+    const sepSpan = document.createElement('span');
+    sepSpan.className = 'cap-sep';
+    sepSpan.setAttribute('aria-hidden', 'true');
+    sepSpan.textContent = '·';
+
+    const gaugeSvg = createSvgEl('svg', {
+      class: 'gauge-svg',
+      width: '18',
+      height: '9',
+      viewBox: '0 0 18 9',
+      'aria-hidden': 'true'
+    });
+    const gaugeTrack = createSvgEl('rect', {
+      class: 'gauge-track',
+      x: '0.5',
+      y: '0.5',
+      width: '17',
+      height: '8',
+      rx: '4'
+    });
+    const gaugeFill = createSvgEl('rect', {
+      class: 'gauge-fill',
+      x: '2',
+      y: '2',
+      width: '0',
+      height: '5',
+      rx: '2.5'
+    });
+    gaugeSvg.appendChild(gaugeTrack);
+    gaugeSvg.appendChild(gaugeFill);
+
+    const ctxSpan = document.createElement('span');
+    ctxSpan.className = 'cap-ctx';
+    ctxSpan.textContent = '~0/256k, 0%';
+
+    btn.appendChild(boltSvg);
+    btn.appendChild(speedSpan);
+    btn.appendChild(sepSpan);
+    btn.appendChild(gaugeSvg);
+    btn.appendChild(ctxSpan);
+
+    const tip = document.createElement('div');
+    tip.id = 'agy-cap-tip';
+    tip.setAttribute('role', 'tooltip');
+    tip.className = 'capsule-tip';
+
+    const tipHead = document.createElement('div');
+    tipHead.className = 'tip-head';
+    const modelEl = document.createElement('span');
+    modelEl.className = 'tip-model';
+    const usedBadgeEl = document.createElement('span');
+    usedBadgeEl.className = 'tip-used-badge';
+    tipHead.appendChild(modelEl);
+    tipHead.appendChild(usedBadgeEl);
+
+    const barTrack = document.createElement('div');
+    barTrack.className = 'tip-bar-track';
+    const barFill = document.createElement('div');
+    barFill.className = 'tip-bar-fill';
+    barTrack.appendChild(barFill);
+
+    const ctxRow = createCapsuleRow();
+    const remainRow = createCapsuleRow();
+    const speedRow = createCapsuleRow();
+
+    const exactWrap = document.createElement('div');
+    exactWrap.className = 'tip-exact-wrap';
+    const cacheRow = createCapsuleRow();
+    const breakdownEl = document.createElement('div');
+    breakdownEl.className = 'tip-breakdown';
+    exactWrap.appendChild(cacheRow.row);
+    exactWrap.appendChild(breakdownEl);
+
+    const estNoticeEl = document.createElement('div');
+    estNoticeEl.className = 'tip-est-notice';
+
+    const compressedEl = document.createElement('div');
+    compressedEl.className = 'tip-compressed';
+    compressedEl.hidden = true;
+
+    const warnEl = document.createElement('div');
+    warnEl.className = 'tip-warn';
+    warnEl.hidden = true;
+
+    const quotaWrap = document.createElement('div');
+    quotaWrap.className = 'tip-quota-wrap';
+    const quotaRow = createCapsuleRow();
+    quotaWrap.appendChild(quotaRow.row);
+    quotaWrap.hidden = true;
+
+    const footEl = document.createElement('div');
+    footEl.className = 'tip-foot';
+
+    tip.appendChild(tipHead);
+    tip.appendChild(barTrack);
+    tip.appendChild(ctxRow.row);
+    tip.appendChild(remainRow.row);
+    tip.appendChild(speedRow.row);
+    tip.appendChild(exactWrap);
+    tip.appendChild(estNoticeEl);
+    tip.appendChild(compressedEl);
+    tip.appendChild(warnEl);
+    tip.appendChild(quotaWrap);
+    tip.appendChild(footEl);
+
+    wrap.appendChild(btn);
+    wrap.appendChild(tip);
+
+    shadow.appendChild(styleEl);
+    shadow.appendChild(wrap);
+
+    const state = {
+      host,
+      shadow,
+      wrap,
+      btn,
+      tip,
+      speedSpan,
+      gaugeFill,
+      ctxSpan,
+      modelEl,
+      usedBadgeEl,
+      barFill,
+      ctxKeyEl: ctxRow.keyEl,
+      ctxValEl: ctxRow.valEl,
+      remainKeyEl: remainRow.keyEl,
+      remainValEl: remainRow.valEl,
+      speedKeyEl: speedRow.keyEl,
+      speedValEl: speedRow.valEl,
+      exactWrap,
+      cacheKeyEl: cacheRow.keyEl,
+      cacheValEl: cacheRow.valEl,
+      breakdownEl,
+      estNoticeEl,
+      compressedEl,
+      warnEl,
+      quotaWrap,
+      quotaKeyEl: quotaRow.keyEl,
+      quotaValEl: quotaRow.valEl,
+      footEl,
+      hoverBtn: false,
+      hoverTip: false,
+      focused: false,
+      dismissedByEsc: false,
+      isOpen: false,
+      hideTimer: null,
+      lastDigest: ''
+    };
+
+    btn.addEventListener('mouseenter', () => {
+      state.hoverBtn = true;
+      state.dismissedByEsc = false;
+      syncCapsuleTipVisibility(state);
+    });
+    btn.addEventListener('mouseleave', () => {
+      state.hoverBtn = false;
+      scheduleCapsuleTipHide(state);
+    });
+    btn.addEventListener('focus', () => {
+      state.focused = true;
+      state.dismissedByEsc = false;
+      syncCapsuleTipVisibility(state);
+    });
+    btn.addEventListener('blur', () => {
+      state.focused = false;
+      state.dismissedByEsc = false;
+      syncCapsuleTipVisibility(state);
+    });
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      state.dismissedByEsc = false;
+      syncCapsuleTipVisibility(state);
+    });
+    btn.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && state.isOpen) {
+        ev.stopPropagation();
+        state.dismissedByEsc = true;
+        syncCapsuleTipVisibility(state);
+      }
+    });
+    tip.addEventListener('mouseenter', () => {
+      state.hoverTip = true;
+      clearCapsuleHideTimer(state);
+      syncCapsuleTipVisibility(state);
+    });
+    tip.addEventListener('mouseleave', () => {
+      state.hoverTip = false;
+      scheduleCapsuleTipHide(state);
+    });
+
+    capsuleStateMap.set(host, state);
+    return state;
+  }
+
+  function updateCapsuleState(state, convData, compEntry, telemetry) {
+    const precision = convData?.precision === 'exact' ? 'exact' : 'estimated';
+    const contextUsed = Math.max(0, Number(convData?.contextUsed) || 0);
+    const contextLimit = Math.max(1, Number(convData?.contextLimit) || 256000);
+    const usagePercent = Number.isFinite(convData?.usagePercent)
+      ? Math.min(100, Math.max(0, Math.round(convData.usagePercent)))
+      : Math.min(100, Math.max(0, Math.round((contextUsed / contextLimit) * 100)));
+    const remainPercent = Number.isFinite(convData?.remainPercent)
+      ? Math.min(100, Math.max(0, Math.round(convData.remainPercent)))
+      : Math.max(0, 100 - usagePercent);
+    const remainTokens = Math.max(0, contextLimit - contextUsed);
+
+    const usedStr = formatCapsuleTokens(contextUsed);
+    const limitStr = formatCapsuleTokens(contextLimit);
+    const usedPrefix = precision === 'estimated' ? '~' : '';
+    const usedDisplay = `${usedPrefix}${usedStr}`;
+
+    const speedNum = Math.max(0, Number(convData?.tokPerSec) || 0);
+    const avgNum = Math.max(0, Number(convData?.avgTokPerSec) || speedNum);
+    const roundedSpeed = Math.round(speedNum);
+    const roundedAvg = Math.round(avgNum);
+
+    const modelLabel =
+      convData?.modelLabel ||
+      compEntry?.modelLabel ||
+      t('capsuleDefaultModel', {}, 'Default Model');
+
+    const remFrac =
+      typeof convData?.remainingFraction === 'number'
+        ? convData.remainingFraction
+        : typeof compEntry?.remainingFraction === 'number'
+          ? compEntry.remainingFraction
+          : null;
+    const resetMs = convData?.resetTimeMs || compEntry?.resetTimeMs || null;
+    const countdown = remFrac !== null ? formatCapsuleResetCountdown(resetMs) : '';
+
+    const cacheHit = Math.min(100, Math.max(0, Math.round(Number(convData?.cacheHitRate) || 0)));
+    const cacheReadStr = formatCapsuleTokens(convData?.cacheReadTokens || 0);
+    const inputStr = formatCapsuleTokens(convData?.inputTokens || 0);
+    const outputStr = formatCapsuleTokens(convData?.outputTokens || 0);
+
+    const compDetected = Boolean(
+      convData?.compressionDetected && (Number(convData?.compressionDrop) || 0) > 0
+    );
+    const compBefore = formatCapsuleTokens(convData?.compressionBefore || 0);
+    const compAfter = formatCapsuleTokens(convData?.compressionAfter || 0);
+    const compDrop = Math.min(99, Math.max(0, Math.round(Number(convData?.compressionDrop) || 0)));
+    const stepCount = Math.max(0, Math.round(Number(convData?.stepCount) || 0));
+
+    const digest = JSON.stringify([
+      precision,
+      usedDisplay,
+      limitStr,
+      usagePercent,
+      remainPercent,
+      roundedSpeed,
+      roundedAvg,
+      modelLabel,
+      remFrac,
+      countdown,
+      cacheHit,
+      cacheReadStr,
+      inputStr,
+      outputStr,
+      compDetected,
+      compBefore,
+      compAfter,
+      compDrop,
+      stepCount,
+      telemetry?.fetchedAt || 0
+    ]);
+    if (digest === state.lastDigest) return;
+    state.lastDigest = digest;
+
+    const healthCls =
+      usagePercent >= 80 ? 'is-danger' : usagePercent >= 50 ? 'is-warn' : 'is-healthy';
+    state.wrap.className = `capsule-wrap ${healthCls}`;
+
+    const speedBtnText = roundedSpeed > 0 ? `${roundedSpeed} tok/s` : '-- tok/s';
+    state.speedSpan.textContent = speedBtnText;
+    state.ctxSpan.textContent = `${usedDisplay}/${limitStr}, ${usagePercent}%`;
+    state.btn.setAttribute(
+      'aria-label',
+      t(
+        'capsuleAriaLabel',
+        { used: usedDisplay, limit: limitStr, pct: usagePercent },
+        `Context usage ${usedDisplay} of ${limitStr} (${usagePercent}%)`
+      )
+    );
+
+    const gaugeW = usagePercent > 0 ? Math.max(2, Math.round((14 * usagePercent) / 100)) : 0;
+    state.gaugeFill.setAttribute('width', String(gaugeW));
+    state.barFill.style.width = `${usagePercent}%`;
+
+    state.modelEl.textContent = modelLabel;
+    state.usedBadgeEl.textContent = t('capsuleUsedPct', { pct: usagePercent }, `${usagePercent}% used`);
+
+    state.ctxKeyEl.textContent = t('capsuleContextUsed', {}, 'Context Used');
+    state.ctxValEl.textContent = `${usedDisplay} / ${limitStr}`;
+
+    state.remainKeyEl.textContent = t('capsuleRemainCap', {}, 'Remaining Capacity');
+    state.remainValEl.textContent = `${formatCapsuleTokens(remainTokens)} (${remainPercent}%)`;
+
+    state.speedKeyEl.textContent = t('capsuleGenSpeedLabel', {}, 'Generation Speed');
+    state.speedValEl.textContent =
+      roundedSpeed > 0 || roundedAvg > 0
+        ? t(
+            'capsuleGenSpeed',
+            { speed: roundedSpeed, avg: roundedAvg },
+            `${roundedSpeed} tok/s (avg ${roundedAvg} tok/s)`
+          )
+        : '-- tok/s';
+
+    if (precision === 'exact') {
+      state.exactWrap.hidden = false;
+      state.estNoticeEl.hidden = true;
+      state.cacheKeyEl.textContent = t('capsuleCacheHitLabel', {}, 'Prompt Cache Hit');
+      state.cacheValEl.textContent = `${cacheHit}%`;
+      state.breakdownEl.textContent = t(
+        'capsuleBreakdownLine',
+        { cache: cacheReadStr, input: inputStr, output: outputStr },
+        `Cache: ${cacheReadStr} · In: ${inputStr} · Out: ${outputStr}`
+      );
+    } else {
+      state.exactWrap.hidden = true;
+      state.estNoticeEl.hidden = false;
+      state.estNoticeEl.textContent = t(
+        'capsuleEstNotice',
+        {},
+        'Estimated from visible steps'
+      );
+    }
+
+    if (compDetected) {
+      state.compressedEl.hidden = false;
+      state.compressedEl.textContent = t(
+        'capsuleAutoCompressed',
+        { before: compBefore, after: compAfter, drop: compDrop },
+        `Auto-compressed: ${compBefore} → ${compAfter} (-${compDrop}%)`
+      );
+    } else {
+      state.compressedEl.hidden = true;
+    }
+
+    if (usagePercent >= 80) {
+      state.warnEl.hidden = false;
+      state.warnEl.textContent = t(
+        'capsuleCompactionWarn',
+        {},
+        'Approaching auto-compaction threshold'
+      );
+    } else {
+      state.warnEl.hidden = true;
+    }
+
+    if (remFrac !== null) {
+      const remQuotaPct = Math.min(100, Math.max(0, Math.round(remFrac * 100)));
+      state.quotaWrap.hidden = false;
+      state.quotaKeyEl.textContent = t('capsuleQuotaRowLabel', {}, '5h Remaining Quota');
+      state.quotaValEl.textContent = countdown ? `${remQuotaPct}% · ${countdown}` : `${remQuotaPct}%`;
+    } else {
+      state.quotaWrap.hidden = true;
+    }
+
+    state.footEl.textContent = t('capsuleStepsCount', { count: stepCount }, `Steps: ${stepCount}`);
+  }
+
+  function removeAllCapsules() {
+    openCapsuleStates.clear();
+    for (const host of document.querySelectorAll(`[${CAPSULE_HOST_ATTR}="1"]`)) {
+      const st = capsuleStateMap.get(host);
+      if (st) {
+        clearCapsuleHideTimer(st);
+        capsuleStateMap.delete(host);
+      }
+      host.remove();
+    }
+  }
+
+  function syncInPageCapsules(enabled, telemetry) {
+    if (!enabled || (isLocalContext && !isLocalAntigravityConfirmed()) || !document.body) {
+      removeAllCapsules();
+      return;
+    }
+
+    const footers = Array.from(document.querySelectorAll('.agy-composer-footer'));
+    const validHosts = new Set();
+    const composers = Array.isArray(telemetry?.composers) ? telemetry.composers : [];
+    const convs =
+      telemetry?.conversations && typeof telemetry.conversations === 'object'
+        ? telemetry.conversations
+        : {};
+
+    for (let idx = 0; idx < footers.length; idx++) {
+      const footer = footers[idx];
+      let host = footer.querySelector(`[${CAPSULE_HOST_ATTR}="1"]`);
+      if (!host) {
+        host = document.createElement('span');
+        host.setAttribute(CAPSULE_HOST_ATTR, '1');
+        const permBtn = footer.querySelector('button[data-testid="permissions-selector-trigger"]');
+        const rightControls = footer.querySelector('.shrink-0.flex.items-center');
+        if (permBtn && permBtn.parentElement) {
+          permBtn.parentElement.insertBefore(host, permBtn);
+        } else if (rightControls) {
+          rightControls.insertBefore(host, rightControls.firstChild);
+        } else {
+          footer.insertBefore(host, footer.firstChild);
+        }
+      }
+      validHosts.add(host);
+
+      const state = capsuleStateMap.get(host) || buildCapsuleInstance(host);
+      const compEntry = composers[idx] || null;
+      const convId = compEntry?.convId || telemetry?.activeConvId || '';
+      const convData = (convId && convs[convId]) || null;
+      updateCapsuleState(state, convData, compEntry, telemetry || null);
+    }
+
+    for (const host of document.querySelectorAll(`[${CAPSULE_HOST_ATTR}="1"]`)) {
+      if (!validHosts.has(host)) {
+        const st = capsuleStateMap.get(host);
+        if (st) {
+          clearCapsuleHideTimer(st);
+          openCapsuleStates.delete(st);
+          capsuleStateMap.delete(host);
+        }
+        host.remove();
+      }
+    }
   }
 
   window.__AGY_SCANNER__ = {
@@ -2294,7 +3284,9 @@
     focusTaskById,
     probeCollapsedProjects,
     onProbeComplete,
-    scanDiagnostics
+    scanDiagnostics,
+    isLocalAntigravityConfirmed,
+    syncInPageCapsules
   };
 })();
 

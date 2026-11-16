@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [2.9.0] — 5h Model Quota Pools, Context & Speed Telemetry, In-Page Capsule & Localhost Mode
+
+### Added
+- **5-Hour Model Quota Pool Overview (`popup.html`, `sidepanel.html`, `popup.css`, `popup.js`):** Added `#quotaStrip` displaying remaining 5h quota percentages and reset countdowns across `Gemini` and `Claude / GPT` (`premium`) pools using native `<progress class="quota-progress">` bars with Morandi 3A health coloring (`#5E9E8E`, `#C6A265`, `#C26C77`) and separate vendor pseudo-element rules.
+- **Passive + Gated Read-Only Connect-RPC Telemetry (`page-bridge.js`):**
+  - Extended the passive `fetch`/`XHR`/`WebSocket` observer (`ingestNetworkPayload()`) and React Fiber/Query/Store scanner to capture `userStatus`, `clientModelConfigs`, `trajectorySummaries`, step summaries (FIFO capped at 40 conversations), and live streaming `tok/s` speed.
+  - Added gated same-origin read-only Connect-RPC (`maybeRefreshLsRpc` for `GetUserStatus`, `GetAllCascadeTrajectories`, and incremental `GetCascadeTrajectorySteps`) active strictly when `document.hidden !== true` and `window.__APP_CONFIG__?.csrfToken` or `/exa.language_server_pb.LanguageServerService/` traffic is observed.
+  - Implemented `analyzeConversationSteps()` with shadow/subagent/image model filtering (`M50`, `FLASH_LITE`, `M21`, `IMAGE`, `BANANA`), dynamic context limits, snapshot + tail-delta precision (`'exact'` vs `'estimated'` without fabricating prompt cache hit ratios), and auto-compaction drop detection (`> 5000` tokens).
+- **Per-Chat Context, Speed & Compaction Badges (`popup.js`, `popup.css`):** Displays formatted token usage (`~?used/limit (pct%)`), live `tok/s` chips, auto-compaction drop chips (`-drop%`), and exact Cache/In/Out/Hit% breakdown tooltips when `precision === 'exact'`.
+- **Optional Isolated Shadow DOM Composer Capsule (`scanner.js`, `content.js`, `frame-detector.js`):** Added an opt-in (`showInPageCapsule: false` by default) capsule mounted inside `.agy-composer-footer` using `attachShadow({ mode: 'open' })`, `WeakMap`-backed state (zero DOM expandos, zero `innerHTML`, zero `localStorage`), `tabular-nums`, `prefers-reduced-motion`, `forced-colors`, and a WCAG 1.4.13 hover/focus/Escape tooltip.
+- **Opt-In Localhost Desktop Webview Support (`manifest.json`, `background.js`, `popup.js`, `page-bridge.js`, `scanner.js`, `i18n.js`):** Added `"scripting"` permission and `optional_host_permissions` (`["http://localhost/*", "http://127.0.0.1/*"]`) triggered synchronously via `#localhostAccessBtn`, dynamic script registration/injection (`syncLocalhostContentScripts()`, `SYNC_LOCALHOST_SCRIPTS`), and verified host probing (`isVerifiedLocalAntigravity()` / `data-agy-local-host`) so non-Antigravity local servers remain untouched.
+- **New `chrome.storage.sync` Settings:** Added `showQuotaMetrics` (`true`), `showContextMetrics` (`true`), and `showInPageCapsule` (`false`).
+- **161-Key 10-Locale Parity (`i18n.js`, `scripts/verify.mjs`):** Expanded `i18n.js` from 129 to 161 canonical keys across all 10 locales, updated `i18n.js` host guard for `http://localhost` / `http://127.0.0.1` and local `ancestorOrigins`, and updated `scripts/verify.mjs` to enforce `"scripting"`, `optional_host_permissions`, `161`-key parity, and localhost host-guard sandbox tests.
+
+---
+
 ## [2.8.0] — Cross-Tab Global Panel & Persistent Side Panel
 
 ### Added

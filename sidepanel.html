@@ -13,7 +13,7 @@
       <div class="brand">
         <img src="icons/icon32.png" alt="" width="28" height="28" class="brand-logo" />
         <div class="brand-text">
-          <h1 class="brand-title"><span data-i18n="brandTitle">Antigravity Tab Status</span> <span class="ver">v2.8.0</span></h1>
+          <h1 class="brand-title"><span data-i18n="brandTitle">Antigravity Tab Status</span> <span class="ver">v2.9.0</span></h1>
           <p class="brand-subtitle" data-i18n="brandSubtitle">Pure tab status lights · Waiting / Unread first</p>
         </div>
       </div>
@@ -68,6 +68,8 @@
           <span id="pillRunning" class="stat-pill running">Running 0</span>
           <span id="pillTotal" class="stat-pill neutral">0 projects · 0 chats</span>
         </div>
+
+        <div id="quotaStrip" class="quota-strip hidden" role="region" data-i18n-aria-label="quotaStripAria" aria-label="5-hour model quota overview"></div>
 
         <div id="actionBanner" class="action-banner hidden">
           <button type="button" id="primaryActionBtn" class="primary-btn"></button>
@@ -179,6 +181,48 @@
           </div>
 
           <div class="compact-row toggle-row">
+            <label for="showQuotaToggle" class="row-label" data-i18n="showQuotaLabel">Show 5h quota pools in panel</label>
+            <span class="switch mini-switch">
+              <input
+                type="checkbox"
+                id="showQuotaToggle"
+                role="switch"
+                checked
+              />
+              <span class="slider" aria-hidden="true"></span>
+            </span>
+          </div>
+
+          <div class="compact-row toggle-row">
+            <label for="showContextToggle" class="row-label" data-i18n="showContextLabel">Show context &amp; tok/s on chats</label>
+            <span class="switch mini-switch">
+              <input
+                type="checkbox"
+                id="showContextToggle"
+                role="switch"
+                checked
+              />
+              <span class="slider" aria-hidden="true"></span>
+            </span>
+          </div>
+
+          <div class="compact-row toggle-row">
+            <div class="row-label-stack">
+              <label for="showInPageCapsuleToggle" class="row-label" data-i18n="inPageCapsuleLabel">Show in-page composer capsule</label>
+              <span id="inPageCapsuleHint" class="row-hint" data-i18n="inPageCapsuleHint">Off by default; mounts an isolated capsule next to composer controls</span>
+            </div>
+            <span class="switch mini-switch">
+              <input
+                type="checkbox"
+                id="showInPageCapsuleToggle"
+                role="switch"
+                aria-describedby="inPageCapsuleHint"
+              />
+              <span class="slider" aria-hidden="true"></span>
+            </span>
+          </div>
+
+          <div class="compact-row toggle-row">
             <div class="row-label-stack">
               <label for="autoProbeCollapsedToggle" class="row-label" data-i18n="autoProbeLabel">Auto-probe collapsed projects</label>
               <span id="autoProbeHint" class="row-hint" data-i18n="autoProbeHint">Off by default; prefers zero-flicker memory read</span>
@@ -192,6 +236,22 @@
               />
               <span class="slider" aria-hidden="true"></span>
             </span>
+          </div>
+
+          <div id="localhostAccessRow" class="compact-row toggle-row">
+            <div class="row-label-stack">
+              <span id="localhostAccessLabel" class="row-label" data-i18n="localhostAccessLabel">Local Antigravity (localhost)</span>
+              <span id="localhostAccessHint" class="row-hint" data-i18n="localhostAccessHint">Optional access for local desktop webviews on localhost / 127.0.0.1</span>
+            </div>
+            <button
+              type="button"
+              id="localhostAccessBtn"
+              class="mini-sync-btn"
+              data-i18n="localhostGrantBtn"
+              aria-labelledby="localhostAccessLabel localhostAccessBtn"
+              aria-describedby="localhostAccessHint"
+              aria-pressed="false"
+            >Enable</button>
           </div>
 
           <div id="previewBlock" class="preview-block">

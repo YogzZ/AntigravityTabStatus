@@ -1,6 +1,6 @@
 # AGENTS.md — Contributor & AI Agent Guide
 
-Repository guidance for AI coding agents and open-source contributors working on **Antigravity Tab Status** (`v2.8.0`).
+Repository guidance for AI coding agents and open-source contributors working on **Antigravity Tab Status** (`v2.9.0`).
 
 ---
 
@@ -48,9 +48,10 @@ Google Antigravity enforces strict Content Security Policy rules (`script-src 's
   - Always handle or consume `chrome.runtime.lastError` in callback-based Chrome APIs and guard against invalidated extension contexts (`chrome.runtime?.id`) after extension reloads.
 - **Ephemeral Service Worker:** `background.js` can be terminated after ~30s of inactivity. Never persist user settings or durable app state in Service Worker globals; use `chrome.storage.sync` (settings) or `chrome.storage.local` / `chrome.storage.session` when needed.
 - **Minimal Permissions:**
-  - `permissions`: `["storage", "sidePanel"]` only (do NOT add `tabs`, `<all_urls>` permissions, or analytics).
+  - `permissions`: `["storage", "sidePanel", "scripting"]` only (do NOT add `tabs`, `<all_urls>` permissions, or analytics).
   - `host_permissions`: Scoped strictly to Antigravity origins (`https://antigravity.google.com/*`, `https://*.antigravity.google.com/*`, `https://antigravity.google/*`, `https://*.antigravity.google/*`), isolated Antigravity workspace iframe hosts (`https://*.usercontent.goog/*`, guarded by `location.ancestorOrigins` verification in every `all_frames: true` script), and `https://*.gstatic.com/*` (for favicon decoding in `background.js`).
-- **Read-Only Memory/Network Observation:** `page-bridge.js` must passively observe and clone data only — never mutate or intercept/block host `fetch`, `XHR`, or `WebSocket` payloads.
+  - `optional_host_permissions`: `["http://localhost/*", "http://127.0.0.1/*"]` only (never `<all_urls>` or `*.google.com`). Requested strictly on explicit user gesture via synchronous `chrome.permissions.request()` in the `#localhostAccessBtn` handler before any `await`, registered/injected dynamically via `chrome.scripting` (`syncLocalhostContentScripts()`), and gated in-page by `isVerifiedLocalAntigravity()` (`data-agy-local-host`) so non-Antigravity local servers remain untouched.
+- **Read-Only Memory/Network Observation & Gated Same-Origin RPC:** `page-bridge.js` must passively observe and clone `fetch`/`XHR`/`WebSocket` payloads only — never mutate or intercept/block host traffic. Read-only same-origin Connect-RPC (`maybeRefreshLsRpc` against `/exa.language_server_pb.LanguageServerService/*`) may run ONLY when `document.hidden !== true` AND `(Boolean(window.__APP_CONFIG__?.csrfToken) || sawLanguageServerEndpoint)` is true (never fire blind RPCs on `antigravity.google.com` without observed `LanguageServerService` traffic).
 
 ---
 
@@ -60,11 +61,11 @@ Google Antigravity enforces strict Content Security Policy rules (`script-src 's
 
 | Context / World | Files | Load Timing | Responsibilities |
 | :--- | :--- | :--- | :--- |
-| **MAIN World** | `page-bridge.js` | `document_start`, `all_frames: true` (`antigravity.google(.com)` + `*.usercontent.goog` workspace iframes with `ancestorOrigins` guard + `match_about_blank`/`match_origin_as_fallback`) | Traverses React 18/19 Fiber (`HostRoot`, `Context.Provider`, `dependencies.firstContext`), TanStack `QueryClient`, Redux/Zustand stores, and passively observes `fetch`/`XHR`/`WebSocket` streams with a `500ms` result cache (and FIFO cap at `1000` entries). Outputs structured `{ reasonCode, reasonVars, reason }` without depending on `window.__AGY_I18N__`. |
-| **ISOLATED World (Top Frame)** | `i18n.js` -> `scanner.js` -> `content.js` | `document_idle`, `all_frames: false` (`antigravity.google(.com)` origins) | Aggregates top-frame + child-iframe workspace states, resolves global priority, runs completion debounce (`1500ms`), translates `reasonCode` via `window.__AGY_I18N__`, renders the 64x64 Canvas status light favicon, updates `chrome.action` badge count, strips any legacy title suffixes, and validates origins on child-frame `postMessage` traffic (permitting only `antigravity.google(.com)` and mounted `*.usercontent.goog` workspace iframes). |
-| **ISOLATED World (Child Frames)** | `i18n.js` -> `scanner.js` -> `frame-detector.js` | `document_idle`, `all_frames: true` (`antigravity.google(.com)` + `*.usercontent.goog` workspace iframes with `ancestorOrigins` guard + `match_about_blank`/`match_origin_as_fallback`) | Scans workspace iframes (`window.top !== window.self`) and relays snapshots to the top frame via origin-verified `window.top.postMessage` and `CHILD_FRAME_SYNC` through `background.js`. |
-| **Extension Service Worker** | `background.js` | Event-driven | Hosts `agy-timer` Port (`START_INTERVAL`, `STOP_INTERVAL`, `SET_TIMEOUT`, `CLEAR_TIMEOUT`), decodes favicons into 64x64 RGBA pixels via `OffscreenCanvas` (`FETCH_FAVICON_PIXELS`), aggregates global toolbar badges via `chrome.storage.session`, synchronizes `actionClickMode` (`setPanelBehavior` + `setPopup`), and relays child-frame sync & task focus broadcasts (`FOCUS_TASK_BROADCAST`, `PROBE_COLLAPSED_BROADCAST`). |
-| **Extension Popup & Side Panel** | `popup.html`, `sidepanel.html`, `popup.css`, `i18n.js`, `popup.js` | On action click / Side Panel open | Discovers live Antigravity tabs across all browser windows (even when browsing unrelated websites), aggregates single or multi-instance project/conversation trees with one-click cross-tab activation, provides Side Panel launch & `actionClickMode` controls, mark-all-read, light style picker, mount layout, preview mode, and custom selectors. |
+| **MAIN World** | `page-bridge.js` | `document_start`, `all_frames: true` (`antigravity.google(.com)` + `*.usercontent.goog` workspace iframes with `ancestorOrigins` guard, plus opt-in verified `localhost`/`127.0.0.1`) | Traverses React 18/19 Fiber (`HostRoot`, `Context.Provider`, `dependencies.firstContext`), TanStack `QueryClient`, Redux/Zustand stores, and passively observes `fetch`/`XHR`/`WebSocket` streams (`500ms` cache, FIFO cap `1000`, step summaries bounded at `40` conversations). Computes v2.9.0 telemetry (5h `gemini`/`premium` quota pools, snapshot+tail-delta context tokens with `exact`/`estimated` precision and `M50`/`FLASH_LITE`/`M21`/`IMAGE`/`BANANA` filtering, live `tok/s`, auto-compaction drops, and gated same-origin Connect-RPC). Outputs structured `{ reasonCode, reasonVars, reason }` without depending on `window.__AGY_I18N__`. |
+| **ISOLATED World (Top Frame)** | `i18n.js` -> `scanner.js` -> `content.js` | `document_idle`, `all_frames: false` (`antigravity.google(.com)` + opt-in verified `localhost`/`127.0.0.1`) | Aggregates top-frame + child-iframe workspace states and telemetry (`mergeTelemetry`), resolves global priority, runs completion debounce (`1500ms`), translates `reasonCode` via `window.__AGY_I18N__`, renders the 64x64 Canvas status light favicon, optionally mounts the isolated Shadow DOM composer capsule (`syncInPageCapsules` in `scanner.js`, `WeakMap`-backed, zero `innerHTML`/`localStorage`, WCAG 1.4.13 tooltip), updates `chrome.action` badge count, strips legacy title suffixes, and validates origins on child-frame `postMessage` traffic. |
+| **ISOLATED World (Child Frames)** | `i18n.js` -> `scanner.js` -> `frame-detector.js` | `document_idle`, `all_frames: true` (`antigravity.google(.com)` + `*.usercontent.goog` + opt-in verified `localhost`/`127.0.0.1` via `ancestorOrigins`) | Scans workspace iframes (`window.top !== window.self`), updates optional Shadow DOM capsules inside child frames, and relays snapshots + `telemetry` to the top frame via origin-verified `window.top.postMessage` and `CHILD_FRAME_SYNC` through `background.js`. |
+| **Extension Service Worker** | `background.js` | Event-driven | Hosts `agy-timer` Port (`START_INTERVAL`, `STOP_INTERVAL`, `SET_TIMEOUT`, `CLEAR_TIMEOUT`), decodes favicons into 64x64 RGBA pixels via `OffscreenCanvas` (`FETCH_FAVICON_PIXELS`), aggregates global toolbar badges via `chrome.storage.session`, synchronizes `actionClickMode` (`setPanelBehavior` + `setPopup`), dynamically registers/injects opt-in `localhost`/`127.0.0.1` content scripts (`syncLocalhostContentScripts()`, `SYNC_LOCALHOST_SCRIPTS`), and relays child-frame sync (`telemetry`) & task focus broadcasts (`FOCUS_TASK_BROADCAST`, `PROBE_COLLAPSED_BROADCAST`). |
+| **Extension Popup & Side Panel** | `popup.html`, `sidepanel.html`, `popup.css`, `i18n.js`, `popup.js` | On action click / Side Panel open | Discovers live Antigravity tabs (and authorized localhost Antigravity tabs) across all browser windows, renders 5h quota pool bars (`#quotaStrip` with native `<progress class="quota-progress">` and separate vendor rules), displays per-chat context/speed/compaction chips, aggregates multi-instance project/conversation trees with one-click cross-tab activation, provides Side Panel launch & `actionClickMode` controls, `showQuotaMetrics`/`showContextMetrics`/`showInPageCapsule` toggles, synchronous `#localhostAccessBtn` permission control, mark-all-read, light style picker, mount layout, preview mode, and custom selectors. |
 
 > **Script Ordering Rule:** In both `ISOLATED` `content_scripts` entries in `manifest.json` AND in `popup.html` / `sidepanel.html`, `i18n.js` MUST load **before** `scanner.js`, `content.js`, `frame-detector.js`, and `popup.js`.
 
@@ -95,10 +96,16 @@ Global tab state strictly follows:
     badgeSize: 'standard',    // 'standard' | 'large'
     actionClickMode: 'popup', // 'popup' | 'sidepanel'
     autoProbeCollapsed: false,
+    showQuotaMetrics: true,
+    showContextMetrics: true,
+    showInPageCapsule: false,
     customWaitingSelector: '',
     customRunningSelector: ''
   }
   ```
+- **Shadow DOM Capsule & Telemetry UI Rules:**
+  - `showInPageCapsule` defaults to `false`; when enabled, the capsule uses `attachShadow({ mode: 'open' })`, `WeakMap` state storage (zero DOM expandos, zero `innerHTML`, zero `localStorage`), Morandi 3A color thresholds (`#5E9E8E` <50% used, `#C6A265` 50–80%, `#C26C77` >=80%), and WCAG 1.4.13 tooltip behavior (`mouseenter`/`focus`, hoverable tooltip, `Escape`/`mouseleave`/`blur` dismissal).
+  - `progress.quota-progress` in `popup.css` MUST use `appearance: none; border: 0 solid; overflow: clip;` and keep `::-webkit-progress-bar`, `::-webkit-progress-value`, and `::-moz-progress-bar` in separate CSS rules.
 
 ---
 
@@ -109,9 +116,9 @@ Supported locales (`10`): `en`, `zh_CN`, `zh_TW`, `ja`, `ko`, `es`, `fr`, `de`, 
 1. **Underscore Folder Names:** Chrome extension `_locales/` directories MUST use underscores (`zh_CN`, `zh_TW`, `pt_BR`) — **never** hyphens (`zh-CN`).
 2. **Manifest Locale Strings:** Every `_locales/<locale>/messages.json` MUST define `extName`, `extDescription`, and `actionTitle` matching `manifest.json` (`__MSG_extName__`, `__MSG_extDescription__`, `__MSG_actionTitle__`), with `default_locale: "en"`.
 3. **100% Key Parity in `i18n.js`:**
-   - Every locale dictionary inside `window.__AGY_I18N__` (`i18n.js`) MUST contain the exact same non-empty key set.
+   - Every locale dictionary inside `window.__AGY_I18N__` (`i18n.js`) MUST contain the exact same non-empty key set (`161` canonical keys).
    - Every `[data-i18n]`, `[data-i18n-title]`, `[data-i18n-placeholder]`, and `[data-i18n-aria-label]` attribute in `popup.html` and `sidepanel.html`, every `t('...')` call in `popup.js`, `content.js`, and `scanner.js`, and every `reasonCode` emitted by `page-bridge.js` MUST exist in all 10 locales.
-   - Placeholder tokens (`{count}`, `{name}`, `{sample}`, `{projects}`, `{tasks}`, `{frames}`, `{time}`, `{text}`, `{project}`, `{state}`) must match across all translations of a key.
+   - Placeholder tokens (`{count}`, `{name}`, `{sample}`, `{projects}`, `{tasks}`, `{frames}`, `{time}`, `{text}`, `{project}`, `{state}`, `{drop}`, `{speed}`, `{cache}`, `{input}`, `{output}`, `{hit}`, `{used}`, `{limit}`, `{pct}`, `{avg}`, `{before}`, `{after}`) must match across all translations of a key.
 4. **Preserve Bilingual DOM Scraping Regexes:** Do **not** localize or remove English/Chinese UI-scraping patterns in `scanner.js` (e.g., `RELATIVE_TIME_RE`, `NAV_CHROME_TEXT_RE`, `EMPTY_PLACEHOLDER_RE`, `DESTRUCTIVE_BTN_RE`). Host Antigravity DOM detection must keep working regardless of browser UI language.
 
 ---

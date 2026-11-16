@@ -1,6 +1,6 @@
 [English](./README.md) | **简体中文**
 
-# Antigravity Tab Status (`v2.8.0`)
+# Antigravity Tab Status (`v2.9.0`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-34a853.svg)](./manifest.json)
@@ -12,7 +12,14 @@
 
 ---
 
-## 核心特性 (`v2.8.0`)
+## 核心特性 (`v2.9.0`)
+
+- **5 小时模型配额池、上下文占用与实时 `tok/s` 速率遥测**
+  - **5h 配额池概览条：** 在弹窗与侧边栏顶部通过原生 `<progress>` 状态条展示 `Gemini` 与 `Claude / GPT` 配额池的剩余百分比与重置倒计时。
+  - **单对话上下文与速率徽标：** 在对话行内展示上下文 Token 用量（`used/limit, pct%`）、实时 `tok/s` 生成速率、自动压缩降幅提示（`-drop%`），并在存在真实 `modelUsage` 快照时提供缓存 / 输入 / 输出 / 命中率明细（无快照时诚实标注 `~` 估算，绝不伪造缓存命中率）。
+  - **可选页内输入框用量胶囊（默认关闭）：** 在设置中开启 **「页面输入框显示用量胶囊」**（`showInPageCapsule`）后，可在输入工具栏旁挂载完全隔离的 Shadow DOM 胶囊（`WeakMap` 驱动、零 `innerHTML`/`localStorage`、符合 WCAG 1.4.13 悬停/键盘/`Escape` 提示交互）。
+- **按需授权本地桌面端（localhost）支持**
+  - 在设置中点击 **「本地 Antigravity (localhost) -> 授权启用」** 即可按需授予 `http://localhost/*` 与 `http://127.0.0.1/*` 可选主机权限（`optional_host_permissions` + `scripting`），并支持随时撤销。即使已授权，脚本也会校验 Antigravity 宿主标识（`isVerifiedLocalAntigravity()`），对无关本地开发服务完全静默无侵入。
 
 - **跨网页全局面板 & 常驻 Chrome Side Panel**
   - **任意网页随时看：** 浏览任何网页时，浏览器工具栏都会实时显示汇总的 `待处理 + 未读` 全局角标；点击扩展图标即可直接查看后台 Antigravity 实例、项目与对话进度，无需再切换标签页反复确认。
@@ -44,13 +51,13 @@
 - **10 种语言自动适配**
   - 自动跟随浏览器界面语言切换弹窗界面、状态原因文案与扩展元数据，完整支持 **10 种语言**：
     `en`、`zh_CN`、`zh_TW`、`ja`、`ko`、`es`、`fr`、`de`、`pt_BR`、`ru`。
-- **零点击 React 内存直读引擎**
-  - [`page-bridge.js`](./page-bridge.js) 运行于 MV3 原生 `world: "MAIN"`，内置 **500ms 短时缓存**，直接读取 React 18/19 Fiber、TanStack QueryCache、Zustand/Redux Store 与只读网络流中的折叠项目与对话状态（缓存命中耗时 `< 0.1ms`，零侧边栏闪烁）。
+- **零点击 React 内存直读引擎与受控同源遥测**
+  - [`page-bridge.js`](./page-bridge.js) 运行于 MV3 原生 `world: "MAIN"`，内置 **500ms 短时缓存**，直接读取 React 18/19 Fiber、TanStack QueryCache、Zustand/Redux Store 与只读网络流中的项目状态、模型配额与上下文用量（缓存命中耗时 `< 0.1ms`，零侧边栏闪烁）。仅在标签页可见且确认存在同源 `LanguageServerService` 接口或 `csrfToken` 时，才按需发起只读同源 Connect-RPC 查询（`GetUserStatus`、`GetAllCascadeTrajectories`、增量 `GetCascadeTrajectorySteps`）补充实时遥测。
   - 在弹窗点击任意对话（包括已折叠项目下的对话），自动展开对应项目并精准跳转。
 - **零 CSP 报错 · 隐私优先**
-  - **无 Blob Worker**、无 `eval()`、无任何远程统计或数据上传（详见 [隐私政策](./PRIVACY.md)）。
+  - **无 Blob Worker**、无 `eval()`、无 `localStorage`、无任何远程开发者统计或数据上传（详见 [隐私政策](./PRIVACY.md)）。
   - 后台计时器与 `OffscreenCanvas` 图标解码全部在扩展 Service Worker（[`background.js`](./background.js)）中安全执行。
-  - 仅申请 `storage` 与 `sidePanel` 权限（不请求 `tabs` 或 `<all_urls>`），`content_scripts` 与 `host_permissions` 均严格限定在 Antigravity 域名（`antigravity.google` / `antigravity.google.com`）、内嵌 Antigravity 工作区 iframe 域名（`*.usercontent.goog`，通过 `location.ancestorOrigins` 严格校验顶层来源）与 `gstatic.com` 图标范围内。
+  - 仅申请 `storage`、`sidePanel` 与 `scripting` 权限（不请求 `tabs` 或 `<all_urls>`），强制 `content_scripts` 与 `host_permissions` 均严格限定在 Antigravity 域名（`antigravity.google` / `antigravity.google.com`）、内嵌 Antigravity 工作区 iframe 域名（`*.usercontent.goog`，通过 `location.ancestorOrigins` 严格校验顶层来源）与 `gstatic.com` 图标范围内，外加按需授权的 `optional_host_permissions`（`http://localhost/*`、`http://127.0.0.1/*`）。
 
 ---
 
@@ -67,7 +74,7 @@
 ### 方式二：从源码校验并本地打包
 
 1. 克隆本仓库（`git clone https://github.com/YogzZ/AntigravityTabStatus.git`）。
-2. *（可选）* 运行一键校验并生成纯净发布包（输出到 `dist/antigravity-tab-status-v2.8.0.zip`）：
+2. *（可选）* 运行一键校验并生成纯净发布包（输出到 `dist/antigravity-tab-status-v2.9.0.zip`）：
    ```bash
    node scripts/verify.mjs
    bash scripts/package.sh
@@ -81,18 +88,19 @@
 ## 架构概览
 
 ```text
-Antigravity 页面 (MAIN 世界)
-  └─ page-bridge.js ──(500ms 缓存 + Fiber/QueryCache/流只读采集)──┐
-                                                                  ▼
+Antigravity 页面 / 已校验本地端 (MAIN 世界)
+  └─ page-bridge.js ──(500ms 缓存 + Fiber/QueryCache/流只读采集 + 受控 LS RPC)──┐
+                                                                                  ▼
 Antigravity 页面与子框架 (ISOLATED 世界)
-  ├─ i18n.js ──► scanner.js ──► frame-detector.js (子 iframe) ────┼──► background.js (SW)
-  └─ i18n.js ──► scanner.js ──► content.js (顶层聚合与渲染) ◄─────┘    ├─ agy-timer 端口计时器
-                                    │                                  ├─ OffscreenCanvas 图标解码
-                                    ▼                                  └─ 扩展角标与跨框架消息转发
+  ├─ i18n.js ──► scanner.js ──► frame-detector.js (子 iframe + Shadow 胶囊) ──────┼──► background.js (SW)
+  └─ i18n.js ──► scanner.js ──► content.js (顶层聚合与渲染 + Shadow 胶囊) ◄───────┘    ├─ agy-timer 端口 + scripting
+                                    │                                                  ├─ OffscreenCanvas 图标解码
+                                    ▼                                                  └─ 扩展角标与跨框架消息转发
                         64x64 Canvas 标签页状态灯
                                     ▲
                                     │ (chrome.storage.sync/session + 跨标签页运行时消息)
                       popup.html / sidepanel.html / popup.css / popup.js
+                      (5h 配额概览 + 上下文/tok/s 遥测 + localhost 按需授权)
 ```
 
 ---
@@ -101,23 +109,23 @@ Antigravity 页面与子框架 (ISOLATED 世界)
 
 | 文件 / 目录 | 说明 |
 | :--- | :--- |
-| `manifest.json` | Manifest V3 配置（`v2.8.0`）、`default_locale: "en"`、`storage` + `sidePanel` 权限、受限 `host_permissions`、`MAIN` 与 `ISOLATED` 脚本声明 |
-| `background.js` | MV3 Service Worker：`agy-timer` Port 计时器、`OffscreenCanvas` 图标像素解码、`storage.session` 全局数字角标汇总、`actionClickMode` 同步及跨框架消息转发 |
-| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber、状态存储及被动只读网络流桥接器（内置 500ms 缓存） |
-| `i18n.js` | 浏览器语言自动识别与 10 语言词典（`window.__AGY_I18N__`），服务于弹窗与状态扫描文案 |
-| `scanner.js` | 统一工作区扫描器，融合 DOM、内存桥接快照与已折叠项目缓存 |
-| `content.js` | 顶层全局状态优先级引擎、64x64 Canvas 渲染器（6 种风格 × 2 种挂载模式）、旧标题后缀清理与 Port 动画驱动 |
-| `frame-detector.js` | 子工作区 iframe 扫描与顶层状态同步上报脚本 |
-| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | 适配浅色/深色与无障碍的双形态面板 UI（快捷弹窗 + `100dvh` 响应式侧边栏），提供跨网页实例切换、项目对话一键直达、6 风格 2×3 选择器、点击模式设置、预览与选择器诊断 |
+| `manifest.json` | Manifest V3 配置（`v2.9.0`）、`default_locale: "en"`、`storage` + `sidePanel` + `scripting` 权限、受限 `host_permissions`、按需 `optional_host_permissions`（`localhost`/`127.0.0.1`）、`MAIN` 与 `ISOLATED` 脚本声明 |
+| `background.js` | MV3 Service Worker：`agy-timer` Port 计时器、`OffscreenCanvas` 图标像素解码、`storage.session` 全局数字角标汇总、`actionClickMode` 同步、按需 localhost 动态脚本注册/注入及跨框架消息转发 |
+| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber、状态存储、被动只读网络流桥接器（500ms 缓存、40 对话步数摘要上限）、受控同源 Connect-RPC 及 v2.9.0 配额/上下文/tok/s 遥测引擎 |
+| `i18n.js` | 浏览器语言自动识别与 161 键 10 语言词典（`window.__AGY_I18N__`），含 Antigravity 与按需 localhost 宿主校验守卫 |
+| `scanner.js` | 统一工作区扫描器，融合 DOM、内存桥接快照与遥测、已折叠项目缓存及可选隔离 Shadow DOM 用量胶囊 |
+| `content.js` | 顶层全局状态与遥测合并引擎、64x64 Canvas 渲染器（6 种风格 × 2 种挂载模式）、旧标题后缀清理、Shadow DOM 胶囊同步与 Port 动画驱动 |
+| `frame-detector.js` | 子工作区 iframe 扫描、遥测转发与子框架 Shadow DOM 胶囊同步脚本 |
+| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | 适配浅色/深色与无障碍的双形态面板 UI（快捷弹窗 + `100dvh` 响应式侧边栏），提供 5h 配额池概览、单对话上下文/速率/压缩徽标、跨网页实例切换、项目对话一键直达、2×3 风格选择器、可选 localhost 授权控制、预览与诊断 |
 | `_locales/` | Chrome 扩展多语言元数据目录（`en`、`zh_CN`、`zh_TW`、`ja`、`ko`、`es`、`fr`、`de`、`pt_BR`、`ru`） |
 | `icons/` | 扩展图标资源（`16x16`、`32x32`、`48x48`、`128x128`） |
 | `AGENTS.md` | 开发者与 AI Agent 协作规范、浏览器支持策略、CSP/MV3 约束及校验打包命令 |
-| `PLAN.md` | v2.6.0–v2.7.0 架构拆解与开源演进路线图 |
+| `PLAN.md` | v2.6.0–v2.9.0 架构拆解与开源演进路线图 |
 | `CHANGELOG.md` | 遵循 Keep a Changelog 规范的版本更新日志 |
 | `PRIVACY.md` | 隐私政策及本地存储 / 权限使用说明 |
 | `CHROMEWEBSTORE.md` | Chrome / Edge 扩展商店上架文案、权限说明及提审清单 |
 | `LICENSE` | MIT 开源许可证 |
-| `scripts/verify.mjs` | 零第三方依赖 Node 校验脚本（语法、MV3 权限范围、10 语言 129 键、CSP/安全、PNG 完整性与敏感信息扫描） |
+| `scripts/verify.mjs` | 零第三方依赖 Node 校验脚本（语法、MV3 与可选权限范围、10 语言 161 键、CSP/安全、PNG 完整性与敏感信息扫描） |
 | `scripts/package.sh` | 自动运行校验并在 `dist/` 生成仅含运行时文件的纯净发布 `.zip` 包 |
 | `.github/workflows/ci.yml` | GitHub Actions 自动校验与构建工作流 |
 | `.gitignore` | Git 忽略规则（系统缓存、构建目录 `dist/`、`*.zip` / `*.crx` / `*.pem`、依赖及编辑器配置） |
@@ -132,7 +140,7 @@ Antigravity 页面与子框架 (ISOLATED 世界)
 # 运行脚本语法、manifest 权限范围、10 语言 i18n、CSP/安全、PNG 图标及敏感信息扫描
 node scripts/verify.mjs
 
-# 执行全量校验并构建纯净发布包 dist/antigravity-tab-status-v2.8.0.zip
+# 执行全量校验并构建纯净发布包 dist/antigravity-tab-status-v2.9.0.zip
 bash scripts/package.sh
 ```
 

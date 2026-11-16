@@ -6,7 +6,7 @@
  * 1. JavaScript syntax across all extension scripts via vm.Script
  * 2. Manifest V3 structure, strictly scoped permissions & content_scripts, script ordering
  * 3. All 10 _locales/<locale>/messages.json files and 132-char description limit
- * 4. 129-key 10-locale parity & placeholder parity in i18n.js + host guard behavior
+ * 4. 161-key 10-locale parity & placeholder parity in i18n.js + host guard behavior
  * 5. CSP compliance & postMessage origin-safety checks across JS/HTML
  * 6. PNG header/dimension/metadata-chunk/permission checks in icons/
  * 7. PII, local user path, email, and workspace-identifier leak checks
@@ -31,6 +31,7 @@ const JS_FILES = [
 ];
 const ALLOWED_HOSTS_RE =
   /^https:\/\/(\*\.)?(antigravity\.google(\.com)?|usercontent\.goog|gstatic\.com)\/\*$/i;
+const EXPECTED_OPTIONAL_HOSTS = ['http://localhost/*', 'http://127.0.0.1/*'];
 const EXPECTED_ICONS = {
   'icons/icon16.png': 16,
   'icons/icon32.png': 32,
@@ -80,10 +81,11 @@ assert(manifest.manifest_version === 3, 'manifest.json: manifest_version must be
 assert(manifest.default_locale === 'en', 'manifest.json: default_locale must be "en"');
 assert(
   Array.isArray(manifest.permissions) &&
-    manifest.permissions.length === 2 &&
+    manifest.permissions.length === 3 &&
     manifest.permissions.includes('storage') &&
-    manifest.permissions.includes('sidePanel'),
-  'manifest.json: permissions must strictly equal ["storage", "sidePanel"]'
+    manifest.permissions.includes('sidePanel') &&
+    manifest.permissions.includes('scripting'),
+  'manifest.json: permissions must strictly equal ["storage", "sidePanel", "scripting"]'
 );
 assert(
   Array.isArray(manifest.host_permissions) && manifest.host_permissions.length > 0,
@@ -93,6 +95,18 @@ for (const hp of manifest.host_permissions || []) {
   assert(
     hp !== '<all_urls>' && ALLOWED_HOSTS_RE.test(hp),
     `manifest.json: unexpected host_permission "${hp}"`
+  );
+}
+assert(
+  Array.isArray(manifest.optional_host_permissions) &&
+    manifest.optional_host_permissions.length === EXPECTED_OPTIONAL_HOSTS.length &&
+    EXPECTED_OPTIONAL_HOSTS.every((h) => manifest.optional_host_permissions.includes(h)),
+  'manifest.json: optional_host_permissions must strictly equal ["http://localhost/*", "http://127.0.0.1/*"]'
+);
+for (const ohp of manifest.optional_host_permissions || []) {
+  assert(
+    ohp !== '<all_urls>' && !/google\.com/i.test(ohp) && EXPECTED_OPTIONAL_HOSTS.includes(ohp),
+    `manifest.json: unexpected optional_host_permission "${ohp}"`
   );
 }
 assert(
@@ -157,7 +171,7 @@ for (const loc of LOCALES) {
 }
 checks.push(`_locales/*/messages.json validated (${LOCALES.length} locales)`);
 
-// 4. i18n.js 129-key parity, placeholder consistency, and origin guard tests
+// 4. i18n.js 161-key parity, placeholder consistency, and origin guard tests
 const referencedKeys = new Set();
 const panelHtmlEntries = [
   { file: 'popup.html', expectedSurface: 'popup', content: readRel('popup.html') },
@@ -179,8 +193,8 @@ for (const m of bridgeCode.matchAll(/reasonCode:\s*['"]([a-zA-Z0-9_]+)['"]/g)) {
   referencedKeys.add(m[1]);
 }
 assert(
-  referencedKeys.size === 129,
-  `Expected 129 referenced i18n keys, found ${referencedKeys.size}`
+  referencedKeys.size === 161,
+  `Expected 161 referenced i18n keys, found ${referencedKeys.size}`
 );
 
 const i18nSrc = readRel('i18n.js');
@@ -300,7 +314,47 @@ assert(
   }) === undefined,
   'i18n.js guard failed to exit on usercontent.goog iframe with non-Antigravity ancestor'
 );
-checks.push(`i18n 129-key parity, placeholder parity & host guard verified (${LOCALES.length} locales)`);
+assert(
+  Boolean(
+    loadI18nWithEnv({
+      location: { protocol: 'http:', hostname: 'localhost', ancestorOrigins: [] }
+    })
+  ),
+  'i18n.js guard blocked http://localhost'
+);
+assert(
+  Boolean(
+    loadI18nWithEnv({
+      location: { protocol: 'http:', hostname: '127.0.0.1', ancestorOrigins: [] }
+    })
+  ),
+  'i18n.js guard blocked http://127.0.0.1'
+);
+assert(
+  Boolean(
+    loadI18nWithEnv({
+      location: {
+        protocol: 'about:',
+        hostname: '',
+        ancestorOrigins: ['http://localhost:3000']
+      }
+    })
+  ),
+  'i18n.js guard blocked localhost about:blank child frame'
+);
+assert(
+  Boolean(
+    loadI18nWithEnv({
+      location: {
+        protocol: 'about:',
+        hostname: '',
+        ancestorOrigins: ['http://127.0.0.1:8080']
+      }
+    })
+  ),
+  'i18n.js guard blocked 127.0.0.1 about:blank child frame'
+);
+checks.push(`i18n 161-key parity, placeholder parity & host guard verified (${LOCALES.length} locales)`);
 
 // 5. CSP, MV3 & cross-frame safety checks
 for (const { file, expectedSurface, content } of panelHtmlEntries) {
