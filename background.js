@@ -67,7 +67,7 @@ async function hasLocalhostPermission() {
   }
 }
 
-async function syncLocalhostContentScripts() {
+async function syncLocalhostContentScripts({ force = false } = {}) {
   const previousLock = localhostSyncLock;
   let releaseLock;
   localhostSyncLock = new Promise((resolve) => {
@@ -87,6 +87,13 @@ async function syncLocalhostContentScripts() {
     const existingIds = Array.isArray(existing)
       ? existing.map((s) => s.id).filter(Boolean)
       : [];
+
+    // Registered scripts persist across SW restarts; skip churn when already in the desired state.
+    if (!force) {
+      const allPresent = LOCALHOST_SCRIPT_IDS.every((id) => existingIds.includes(id));
+      if (granted && allPresent) return true;
+      if (!granted && existingIds.length === 0) return false;
+    }
 
     if (existingIds.length > 0) {
       await chrome.scripting.unregisterContentScripts({ ids: existingIds });
@@ -288,13 +295,8 @@ async function enqueueBadgeSync(mutatorFn) {
 
 chrome.runtime.onInstalled.addListener(() => {
   void syncActionClickBehavior();
-  void syncLocalhostContentScripts();
-  void enqueueBadgeSync(() => {});
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  void syncActionClickBehavior();
-  void syncLocalhostContentScripts();
+  // Force re-registration so updated script definitions replace persisted ones.
+  void syncLocalhostContentScripts({ force: true });
   void enqueueBadgeSync(() => {});
 });
 
@@ -464,7 +466,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // 2c. 主动唤醒所有子工作区 iframe 立即推送最新快照
   if (message.type === 'PING_CHILD_FRAMES') {
-    const tabId = message.tabId || sender?.tab?.id;
+    const tabId = sender?.tab?.id ?? message.tabId;
     if (tabId) {
       chrome.tabs.sendMessage(
         tabId,
@@ -480,7 +482,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // 3. 更新扩展工具栏图标全局数字角标（汇总所有 Antigravity 标签页的待处理 + 未读数量）
   if (message.type === 'UPDATE_ACTION_BADGE') {
-    const tabId = message.tabId || sender?.tab?.id;
+    const tabId = sender?.tab?.id ?? message.tabId;
     if (typeof tabId === 'number') {
       const count = Math.max(0, Number(message.count) || 0);
       const hasWaiting = Boolean(message.hasWaiting);
@@ -508,7 +510,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // 3b. 顶层 Antigravity 页面卸载或跳离时移除该标签页角标计数
   if (message.type === 'TOP_FRAME_UNLOAD') {
-    const tabId = message.tabId || sender?.tab?.id;
+    const tabId = sender?.tab?.id ?? message.tabId;
     if (typeof tabId === 'number') {
       void enqueueBadgeSync((map) => {
         delete map[String(tabId)];
@@ -519,7 +521,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   // 4. 从弹窗点击某个任务时，向该标签页所有框架广播定位点击指令（含已折叠项目自动展开参数）
-  if (message.type === 'FOCUS_TASK_BROADCAST' && message.tabId && message.taskId) {
+  if (message.type === 'FOCUS_TASK_BROADCAST' && !sender?.tab && message.tabId && message.taskId) {
     chrome.tabs.sendMessage(
       message.tabId,
       {
@@ -537,7 +539,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   // 4b. 手动触发所有框架对已折叠项目的展开快照同步
-  if (message.type === 'PROBE_COLLAPSED_BROADCAST' && message.tabId) {
+  if (message.type === 'PROBE_COLLAPSED_BROADCAST' && !sender?.tab && message.tabId) {
     chrome.tabs.sendMessage(
       message.tabId,
       {
