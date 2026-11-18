@@ -122,7 +122,7 @@
   const NAV_SKIP_RE =
     /^(antigravity|projects|conversation\s*history|history|settings|preferences|customizations|plugins|new\s*conversation|new\s*chat|idle|running|waiting|completed|pending|active|archived|pinned)$/i;
   const GENERIC_CONTAINER_KEY_RE =
-    /^(data|state|props|value|result|items|list|map|cache|meta|metadata|config|options|headers|children|style|theme|styles|actions|dispatch|subscribe|getState|queryClient|client|store|current|firstContext|dependencies)$/i;
+    /^(data|state|props|value|result|items|list|map|cache|meta|metadata|config|options|headers|children|style|theme|styles|actions|dispatch|subscribe|getState|queryClient|client|store|current|firstContext|dependencies|summaries|externalSummaries|indexes|pendingAnnotations|annotations|artifactMetadata|trajectorySummaries|conversations|cascades|trajectories|threads|sessions|chats|tasks|steps|messages|turns|trueState|optimisticState|agentState|summary|detail|details|statusInfo|statusDetail|contextWindowUsage|executorMetadata|modelUsage|modelConfig|currentModelConfig|container|trajectory|cascade|segment|segments|payload|response|request|body|args)$/i;
 
   // 网络层被动观测到的项目与对话字典（只读克隆，绝不篡改原请求/响应，限制上限防止长期驻留增长）
   const netProjectsById = new Map();
@@ -429,6 +429,7 @@
       c.reviewRequest,
       c.blockingStep,
       c.waitingStep,
+      c.waitingSteps,
       c.pendingAction,
       c.interrupt,
       c.blocker,
@@ -523,9 +524,27 @@
       }
     }
 
-    const isTerminalConv = convStatuses.some((st) => TERMINAL_CONV_STATUS_RE.test(st));
+    const isSummaryShape =
+      'backgroundTaskCount' in c ||
+      'trajectoryId' in c ||
+      'notFullyIdle' in c ||
+      (typeof c.$typeName === 'string' && /CascadeTrajectorySummary|AgentState/i.test(c.$typeName));
+    const hasActiveBgTasks =
+      (typeof c.backgroundTaskCount === 'number' && c.backgroundTaskCount > 0) ||
+      c.hasRunningSubagents === true ||
+      (Array.isArray(c.backgroundCommands) && c.backgroundCommands.length > 0);
+    const isNumericIdle =
+      isSummaryShape &&
+      c.status === 1 &&
+      !hasActiveBgTasks &&
+      (!Array.isArray(c.waitingSteps) || c.waitingSteps.length === 0);
+    const isNumericRunning = isSummaryShape && c.status === 2;
+
+    const isTerminalConv =
+      convStatuses.some((st) => TERMINAL_CONV_STATUS_RE.test(st)) || isNumericIdle;
+    let hasRunningStepInTail = false;
     const directStepCandidates = [c.activeStep, c.currentStep, c.lastStep, c.latestStep];
-    if (!isTerminalConv) {
+    if (!isTerminalConv || hasActiveBgTasks) {
       for (const step of directStepCandidates) {
         if (!step || typeof step !== 'object') continue;
         if (hasWaitingBool(step) || stepHasUnansweredWaitingTool(step)) {
@@ -559,10 +578,26 @@
       }
 
       if (Array.isArray(c.steps) && c.steps.length > 0) {
-        const minIdx = Math.max(0, c.steps.length - 3);
+        const minIdx = Math.max(0, c.steps.length - 5);
         for (let i = c.steps.length - 1; i >= minIdx; i--) {
           const step = c.steps[i];
           if (!step || typeof step !== 'object') continue;
+          if (
+            step.taskDetails &&
+            step.taskDetails.requiresInputApproval === true &&
+            step.status !== 3
+          ) {
+            return {
+              state: 'waiting',
+              reasonCode: 'reasonMemWaiting',
+              reasonVars: {},
+              reason: 'Waiting for confirmation (memory state)',
+              hasExplicitStatus: true,
+              isDetailRecord,
+              isTerminal: false,
+              debugFields
+            };
+          }
           if (hasWaitingBool(step) || stepHasUnansweredWaitingTool(step)) {
             return {
               state: 'waiting',
@@ -591,7 +626,11 @@
               };
             }
           }
-          if (stepStatuses.some((sst) => /RUNNING|WORKING|IN_PROGRESS|GENERATING|STREAMING|EXECUTING/.test(sst))) {
+          if (
+            stepStatuses.some((sst) => /RUNNING|WORKING|IN_PROGRESS|GENERATING|STREAMING|EXECUTING/.test(sst)) ||
+            (step.taskDetails && step.status === 2)
+          ) {
+            hasRunningStepInTail = true;
             break;
           }
           const stepKind = String(step.type ?? step.role ?? step.stepType ?? '').toUpperCase();
@@ -610,7 +649,10 @@
       c.isWorking === true ||
       c.isStreaming === true ||
       c.isGenerating === true ||
-      c.agentWorking === true
+      c.agentWorking === true ||
+      hasActiveBgTasks ||
+      isNumericRunning ||
+      hasRunningStepInTail
     ) {
       return {
         state: 'running',
@@ -675,6 +717,7 @@
 
     const hasExplicitStatus =
       convStatuses.length > 0 ||
+      isSummaryShape ||
       'isRunning' in c ||
       'isWorking' in c ||
       'waitingForUser' in c ||
@@ -705,19 +748,26 @@
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
     if (obj.$$typeof || obj.nodeType || obj.stateNode || obj._owner) return false;
 
+    const validFallback =
+      typeof fallbackMapKey === 'string' &&
+      fallbackMapKey.trim() &&
+      !GENERIC_CONTAINER_KEY_RE.test(fallbackMapKey.trim())
+        ? fallbackMapKey.trim()
+        : '';
+    const explicitCascadeId = obj.conversationId ?? obj.cascadeId ?? null;
     const rawId =
-      obj.conversationId ??
-      obj.cascadeId ??
+      explicitCascadeId ??
+      (validFallback || null) ??
       obj.trajectoryId ??
       obj.threadId ??
       obj.sessionId ??
       obj.chatId ??
       obj.taskId ??
       obj.id ??
-      fallbackMapKey;
+      '';
     if (typeof rawId !== 'string' && typeof rawId !== 'number') return false;
     const idStr = String(rawId).trim();
-    if (!idStr || idStr.length > 160) return false;
+    if (!idStr || idStr.length > 160 || GENERIC_CONTAINER_KEY_RE.test(idStr)) return false;
 
     const title =
       obj.title ??
@@ -836,16 +886,23 @@
     knownLowerNames = null,
     lowerToCanonical = null
   ) {
+    const validFallbackConvId =
+      typeof fallbackConvId === 'string' &&
+      fallbackConvId.trim() &&
+      !GENERIC_CONTAINER_KEY_RE.test(fallbackConvId.trim())
+        ? fallbackConvId.trim()
+        : '';
     const idStr = String(
       obj.conversationId ??
         obj.cascadeId ??
+        (validFallbackConvId || null) ??
         obj.trajectoryId ??
         obj.threadId ??
         obj.sessionId ??
         obj.chatId ??
         obj.taskId ??
         obj.id ??
-        fallbackConvId
+        ''
     ).trim();
     const titleStr = String(
       obj.title ??
@@ -1108,7 +1165,7 @@
     const visited = new WeakSet();
     let budget = 1400;
 
-    function walk(val, depth, curProjId, curProjName, parentKey = '') {
+    function walk(val, depth, curProjId, curProjName, parentKey = '', inheritedConvId = '') {
       if (budget <= 0 || depth > 8 || isBlockedBridgeValue(val)) return;
       try {
         if (val instanceof Node || val instanceof Window || val.$$typeof) return;
@@ -1128,27 +1185,34 @@
                 nextProjName = lowerToCanonical ? lowerToCanonical.get(lowK) || lowK : lowK;
               }
             }
-            walk(v, depth + 1, nextProjId, nextProjName, keyStr);
+            walk(v, depth + 1, nextProjId, nextProjName, keyStr, inheritedConvId);
           }
           return;
         }
 
         if (val instanceof Set) {
           for (const item of val.values()) {
-            walk(item, depth + 1, curProjId, curProjName, '');
+            walk(item, depth + 1, curProjId, curProjName, '', inheritedConvId);
           }
           return;
         }
 
         if (Array.isArray(val)) {
           for (let i = 0; i < val.length && i < 120; i++) {
-            walk(val[i], depth + 1, curProjId, curProjName, '');
+            walk(val[i], depth + 1, curProjId, curProjName, '', inheritedConvId);
           }
           return;
         }
 
         let nextProjId = curProjId;
         let nextProjName = curProjName;
+        const ownCascadeId =
+          typeof val.cascadeId === 'string' && val.cascadeId.trim().length >= 6
+            ? val.cascadeId.trim()
+            : typeof val.conversationId === 'string' && val.conversationId.trim().length >= 6
+              ? val.conversationId.trim()
+              : '';
+        const nextConvId = ownCascadeId || inheritedConvId;
 
         // 识别 Project 对象
         try {
@@ -1201,11 +1265,12 @@
           }
         } catch {}
 
-        // 识别 Conversation 对象（兼容字典键作 convId 的情况）
+        // 识别 Conversation 对象（兼容字典键或外层 cascadeId 作 convId 的情况）
         const fallbackConvId =
-          parentKey && parentKey.length >= 4 && !GENERIC_CONTAINER_KEY_RE.test(parentKey)
+          nextConvId ||
+          (parentKey && parentKey.length >= 4 && !GENERIC_CONTAINER_KEY_RE.test(parentKey)
             ? parentKey
-            : '';
+            : '');
         try {
           if (looksLikeConversationObject(val, fallbackConvId)) {
             const conv = extractConvRecord(
@@ -1256,14 +1321,14 @@
               subProjName = lowerToCanonical?.get(lowK) || k;
             }
           }
-          walk(childVal, depth + 1, subProjId, subProjName, k);
+          walk(childVal, depth + 1, subProjId, subProjName, k, nextConvId);
         }
       } catch {
         return;
       }
     }
 
-    walk(rootVal, 0, contextProjId, contextProjName, '');
+    walk(rootVal, 0, contextProjId, contextProjName, '', '');
   }
 
   // ============================================================================
@@ -1346,6 +1411,7 @@
   ]);
 
   const netModelsById = new Map();
+  const netModelIdByNumValue = new Map();
   const convTelemetryById = new Map();
   const composerFallbackIds = new WeakMap();
   let composerFallbackSeq = 0;
@@ -1562,8 +1628,15 @@
     const rawQuota = cfg.quotaInfo ?? cfg.quota;
     const quota = normalizeQuotaInfo(rawQuota);
     const pool = classifyQuotaPool(resolvedId, label);
+    const numVal =
+      typeof cfg.value === 'number' && Number.isFinite(cfg.value) && cfg.value > 0
+        ? String(Math.round(cfg.value))
+        : typeof cfg.model === 'number' && Number.isFinite(cfg.model) && cfg.model > 0
+          ? String(Math.round(cfg.model))
+          : '';
     return {
       modelId: resolvedId,
+      numericId: numVal,
       label: label || resolvedId,
       pool,
       contextLimit: contextLimit > 10000 ? contextLimit : 0,
@@ -1575,6 +1648,9 @@
 
   function upsertModelConfig(info) {
     if (!info || !info.modelId || isShadowModel(info.modelId, info.label)) return false;
+    if (info.numericId) {
+      netModelIdByNumValue.set(info.numericId, info.modelId);
+    }
     const prev = netModelsById.get(info.modelId);
     const next = {
       modelId: info.modelId,
@@ -1607,10 +1683,12 @@
   }
 
   function findModelMeta(modelId, modelLabel) {
-    if (modelId && netModelsById.has(modelId)) {
-      return netModelsById.get(modelId);
+    const rawId = String(modelId || '').trim();
+    const mappedId = rawId && netModelIdByNumValue.get(rawId) ? netModelIdByNumValue.get(rawId) : rawId;
+    if (mappedId && netModelsById.has(mappedId)) {
+      return netModelsById.get(mappedId);
     }
-    const lowId = String(modelId || '').trim().toLowerCase();
+    const lowId = mappedId.toLowerCase();
     const lowLabel = String(modelLabel || '').trim().toLowerCase();
     for (const m of netModelsById.values()) {
       if (lowId && m.modelId.toLowerCase() === lowId) return m;
@@ -1706,13 +1784,14 @@
       step.metadata?.generatorModel ??
         step.metadata?.requestedModel?.model ??
         step.metadata?.model ??
-        (typeof step.model === 'string' ? step.model : '') ??
+        (typeof step.model === 'string' || typeof step.model === 'number' ? step.model : '') ??
         ''
     ).trim();
     if (!rawMu || typeof rawMu !== 'object') {
-      return fallbackModel
+      const resolvedFallback = netModelIdByNumValue.get(fallbackModel) || fallbackModel;
+      return resolvedFallback
         ? {
-            model: fallbackModel,
+            model: resolvedFallback,
             inputTokens: 0,
             cacheReadTokens: 0,
             cacheCreationTokens: 0,
@@ -1720,7 +1799,8 @@
           }
         : null;
     }
-    const model = String(rawMu.model ?? rawMu.modelId ?? rawMu.modelName ?? fallbackModel).trim();
+    const rawModel = String(rawMu.model ?? rawMu.modelId ?? rawMu.modelName ?? fallbackModel).trim();
+    const model = netModelIdByNumValue.get(rawModel) || rawModel;
     const inputTokens = toNonNegInt(
       rawMu.inputTokens ??
         rawMu.input_tokens ??
@@ -1741,7 +1821,9 @@
       rawMu.cacheCreationTokens ??
         rawMu.cache_creation_tokens ??
         rawMu.cacheCreationInputTokens ??
-        rawMu.cache_creation_input_tokens
+        rawMu.cache_creation_input_tokens ??
+        rawMu.cacheWriteTokens ??
+        rawMu.cache_write_tokens
     );
     const outputTokens = toNonNegInt(
       rawMu.outputTokens ??
@@ -1810,6 +1892,7 @@
         stepOffsetBase: 0,
         steps: [],
         hasExactSourceSteps: false,
+        contextWindowUsage: null,
         lastStreamTs: 0,
         lastStreamTokens: 0,
         tokPerSec: 0,
@@ -1900,7 +1983,7 @@
     }
 
     const composerOwned = Boolean(composerInfo && composerInfo.convId === convId);
-    const primaryModelId =
+    const rawPrimaryModelId =
       (composerOwned && composerInfo.modelId && !isShadowModel(composerInfo.modelId)
         ? composerInfo.modelId
         : '') ||
@@ -1908,6 +1991,7 @@
       (convEntry?.modelId && !isShadowModel(convEntry.modelId) ? convEntry.modelId : '') ||
       (composerInfo?.modelId && !isShadowModel(composerInfo.modelId) ? composerInfo.modelId : '') ||
       '';
+    const primaryModelId = netModelIdByNumValue.get(rawPrimaryModelId) || rawPrimaryModelId;
 
     const modelMeta = findModelMeta(
       primaryModelId,
@@ -1919,7 +2003,9 @@
       convEntry?.modelLabel ||
       primaryModelId ||
       '';
-    const contextLimit = getDynamicContextLimit(primaryModelId, modelLabel);
+    const cwu = convEntry?.contextWindowUsage || null;
+    const contextLimit =
+      cwu && cwu.limit > 10000 ? cwu.limit : getDynamicContextLimit(primaryModelId, modelLabel);
 
     let precision = 'estimated';
     let contextUsed = estimatedDelta;
@@ -1931,11 +2017,17 @@
       const totalInSide = inputTokens + cacheReadTokens + cacheCreationTokens;
       cacheHitRate = totalInSide > 0 ? Math.round((cacheReadTokens / totalInSide) * 100) : 0;
     } else {
+      if (cwu && cwu.used > 0 && contextUsed === 0) {
+        contextUsed = cwu.used;
+      }
       inputTokens = 0;
       cacheReadTokens = 0;
       cacheCreationTokens = 0;
       outputTokens = 0;
       cacheHitRate = 0;
+    }
+    if (!compressionDetected && cwu && cwu.estimatedAfterCompaction === true) {
+      compressionDetected = true;
     }
 
     const usagePercent =
@@ -2220,7 +2312,14 @@
 
     // 按更新时间升序插入，确保 FIFO 淘汰最旧对话、保留最新 40 条
     const sorted = pairs
-      .filter(([id, val]) => typeof id === 'string' && id.trim().length >= 4 && val && typeof val === 'object')
+      .filter(
+        ([id, val]) =>
+          typeof id === 'string' &&
+          id.trim().length >= 4 &&
+          !GENERIC_CONTAINER_KEY_RE.test(id.trim()) &&
+          val &&
+          typeof val === 'object'
+      )
       .map(([id, val]) => ({
         id: id.trim(),
         val,
@@ -2287,7 +2386,7 @@
   function ingestTelemetryDataTree(rootVal, meta = {}) {
     if (!rootVal || typeof rootVal !== 'object') return false;
     const visited = meta.visited instanceof WeakSet ? meta.visited : new WeakSet();
-    let budget = meta.source === 'fiber' ? 350 : 500;
+    let budget = typeof meta.budget === 'number' ? meta.budget : meta.source === 'fiber' ? 450 : 500;
     let changed = false;
     const isAuthoritativeTrajectories = Boolean(
       meta.endpoint === 'GetAllCascadeTrajectories' ||
@@ -2359,20 +2458,47 @@
           }
         }
 
-        // 4. 捕获 `steps` / `trajectory.steps` / `turns` / `messages`
+        // 4. 捕获 `steps` / `trajectory.steps` / `turns` / `messages` / `contextWindowUsage`
         const localConvId =
           extractDirectConvId(val, parentKey) ||
           extractDirectConvId(val.trajectory, '') ||
           extractDirectConvId(val.cascade, '') ||
           extractDirectConvId(val.metadata, '') ||
           inheritedConvId;
+
+        if (val.contextWindowUsage && typeof val.contextWindowUsage === 'object' && localConvId) {
+          const cwu = val.contextWindowUsage;
+          const used = toNonNegInt(cwu.estimatedTokensUsed);
+          const limit = toNonNegInt(cwu.maxContextTokens);
+          const lastStepIdx =
+            typeof cwu.lastStepIndex === 'number' && Number.isFinite(cwu.lastStepIndex)
+              ? Math.max(0, Math.round(cwu.lastStepIndex))
+              : -1;
+          if (used > 0 || limit > 10000) {
+            const entry = getOrCreateConvTelemetry(localConvId);
+            entry.contextWindowUsage = {
+              used,
+              limit: limit > 10000 ? limit : 0,
+              lastStepIndex: lastStepIdx,
+              estimatedAfterCompaction: Boolean(cwu.estimatedAfterCompaction),
+              updatedAt: Date.now()
+            };
+            if (lastStepIdx >= 0 && lastStepIdx + 1 > entry.totalStepCount) {
+              entry.totalStepCount = lastStepIdx + 1;
+            }
+            changed = true;
+          }
+        }
+
         const primarySteps = Array.isArray(val.steps)
           ? val.steps
           : Array.isArray(val.trajectory?.steps)
             ? val.trajectory.steps
             : Array.isArray(val.cascade?.trajectory?.steps)
               ? val.cascade.trajectory.steps
-              : null;
+              : Array.isArray(val.container?.steps)
+                ? val.container.steps
+                : null;
         const fallbackTurns = !primarySteps
           ? Array.isArray(val.turns)
             ? val.turns
@@ -2381,14 +2507,20 @@
               : null
           : null;
         const targetArr = primarySteps || fallbackTurns;
-        if (targetArr && localConvId && looksLikeStepArray(targetArr)) {
+        const stepConvId =
+          localConvId ||
+          (Array.isArray(targetArr) &&
+            typeof targetArr[0]?.metadata?.sourceTrajectoryStepInfo?.cascadeId === 'string' &&
+            targetArr[0].metadata.sourceTrajectoryStepInfo.cascadeId.trim()) ||
+          '';
+        if (targetArr && stepConvId && looksLikeStepArray(targetArr)) {
           const norm = normalizeConvState(val);
           const stepOffset = toNonNegInt(
             val.stepOffset ?? (depth === 0 ? meta.requestStepOffset : 0)
           );
           const isInc = Boolean(stepOffset > 0 || (depth === 0 && meta.isStepsEndpoint));
           if (
-            upsertConvSteps(localConvId, targetArr, {
+            upsertConvSteps(stepConvId, targetArr, {
               stepOffset,
               isIncremental: isInc,
               isStepsSource: Boolean(primarySteps),
@@ -2432,7 +2564,17 @@
             k === 'stateNode' ||
             k === 'return' ||
             k === 'sibling' ||
-            k === 'child'
+            k === 'child' ||
+            k === 'renderers' ||
+            k === 'lexicalEditor' ||
+            k === 'cssVariablesProvider' ||
+            k === 'PluginCardRenderer' ||
+            k === 'MermaidDiagram' ||
+            k === 'slashCommandItems' ||
+            k === 'mentionsConfig' ||
+            k === 'renderConfig' ||
+            k === 'getStepRendererConfig' ||
+            k === 'tokenizationService'
           ) {
             continue;
           }
@@ -3496,6 +3638,38 @@
       firstRoot = composerRoot;
     }
 
+    // 扫描 `[data-step-list]` 对话消息列表祖先 Fiber，直接捕获步骤级 `modelUsage` 与 `agentState.contextWindowUsage`
+    try {
+      const stepListEl = document.querySelector?.('[data-step-list], [data-step-index]');
+      let stepFiber = stepListEl ? getReactFiber(stepListEl) : null;
+      if (stepFiber && !firstRoot) {
+        firstRoot = findHostRootFiber(stepFiber);
+      }
+      const stepVisited = new WeakSet();
+      const hintConvId =
+        urlConvId ||
+        composers.find((c) => c.convId && !c.convId.startsWith('composer-panel-'))?.convId ||
+        '';
+      for (let depth = 0; depth < 24 && stepFiber; depth++, stepFiber = stepFiber.return) {
+        if (stepFiber.memoizedProps && typeof stepFiber.memoizedProps === 'object') {
+          ingestTelemetryDataTree(stepFiber.memoizedProps, {
+            source: 'fiber',
+            hintConvId,
+            visited: stepVisited,
+            budget: 800
+          });
+        }
+        for (const val of collectFiberHooksAndContexts(stepFiber)) {
+          ingestTelemetryDataTree(val, {
+            source: 'fiber',
+            hintConvId,
+            visited: stepVisited,
+            budget: 800
+          });
+        }
+      }
+    } catch {}
+
     if (!firstRoot) {
       try {
         const fallbackNode =
@@ -3572,16 +3746,48 @@
     const telemetry = buildTelemetryPayload(composers, urlConvId);
 
     // 汇总每个已知项目的 projectType 与 conversations
+    // 若侧边栏已收起（cleanNames 为空），自动从内存项目表与对话工作区反推项目列表
     const projectsResult = {};
+    const ensureProjectBucket = (name, projMeta = null) => {
+      if (!name) return '';
+      const low = name.toLowerCase();
+      const canonical = lowerToCanonical.get(low) || name;
+      if (!lowerToCanonical.has(low)) {
+        lowerToCanonical.set(low, canonical);
+        knownLowerNames.add(low);
+      }
+      if (!projectsResult[canonical]) {
+        const meta = projMeta || outProjects.byName.get(low);
+        projectsResult[canonical] = {
+          projectId: meta?.id || '',
+          projectType: meta?.projectType || null,
+          hasEmptyArray: Boolean(meta?.hasEmptyArray),
+          tasks: []
+        };
+      }
+      return canonical;
+    };
+
     for (const canonicalName of cleanNames) {
-      const low = canonicalName.toLowerCase();
-      const projMeta = outProjects.byName.get(low);
-      projectsResult[canonicalName] = {
-        projectId: projMeta?.id || '',
-        projectType: projMeta?.projectType || null,
-        hasEmptyArray: Boolean(projMeta?.hasEmptyArray),
-        tasks: []
-      };
+      ensureProjectBucket(canonicalName);
+    }
+
+    if (cleanNames.length === 0) {
+      for (const projMeta of outProjects.byName.values()) {
+        if (projMeta?.name && !NAV_SKIP_RE.test(projMeta.name)) {
+          ensureProjectBucket(projMeta.name, projMeta);
+        }
+      }
+      for (const conv of outConvs.values()) {
+        const inferredName =
+          (conv.projectId && outProjects.byId.get(conv.projectId)?.name) ||
+          conv.projectName ||
+          (Array.isArray(conv.workspaceNames) ? conv.workspaceNames[0] : '') ||
+          '';
+        if (inferredName && !NAV_SKIP_RE.test(inferredName)) {
+          ensureProjectBucket(inferredName);
+        }
+      }
     }
 
     const diagnostics = [];

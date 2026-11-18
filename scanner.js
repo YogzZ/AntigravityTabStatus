@@ -477,11 +477,13 @@
    */
   function detectMainPaneBreadcrumb() {
     if (!document.body) return null;
-    const candidates = document.body.querySelectorAll('header, nav, div');
+    const candidates = document.body.querySelectorAll('nav[aria-label="Breadcrumb"], header, nav, div');
     for (const el of candidates) {
       if (!isElementVisible(el, 20)) continue;
       const r = el.getBoundingClientRect();
-      if (r.left < 185 || r.top > 68 || r.height > 56 || r.width < 160) continue;
+      const isBreadcrumbNav = el.getAttribute('aria-label') === 'Breadcrumb';
+      const minLeft = isBreadcrumbNav ? 40 : 185;
+      if (r.left < minLeft || r.top > 68 || r.height > 56 || r.width < 160) continue;
 
       // 收集顶部栏内的短文本片段（按水平从左到右排列）
       const parts = [];
@@ -625,6 +627,20 @@
         state: 'running',
         reason: t('reasonMainAgentWorking', {}, 'Agent working in main pane')
       };
+    }
+
+    for (const item of btnItems) {
+      if (item.disabled || item.btn.closest('nav')) continue;
+      if (
+        (item.btn.getAttribute('data-testid') === 'idle-status-text' ||
+          /\b\d+\s+tasks?\s+running\b/i.test(item.txt)) &&
+        /\b\d+\s+tasks?\s+running\b/i.test(item.txt)
+      ) {
+        return {
+          state: 'running',
+          reason: t('reasonMainAgentWorking', {}, 'Agent working in main pane')
+        };
+      }
     }
 
     // 右下角红色方形停止按钮
@@ -1674,23 +1690,191 @@
   }
 
   function resolveTaskTelemetry(taskId, isActive, matchedBridgeTask = null) {
-    const convId =
-      (matchedBridgeTask && typeof matchedBridgeTask.convId === 'string' && matchedBridgeTask.convId) ||
-      extractConvIdFromTaskId(taskId) ||
-      (isActive && lastBridgeTelemetry?.activeConvId ? String(lastBridgeTelemetry.activeConvId) : '') ||
-      '';
+    const urlConvId = extractConvIdFromTaskId(taskId);
+    const bridgeConvId =
+      matchedBridgeTask && typeof matchedBridgeTask.convId === 'string'
+        ? matchedBridgeTask.convId
+        : '';
+    const activeConvId =
+      isActive && lastBridgeTelemetry?.activeConvId ? String(lastBridgeTelemetry.activeConvId) : '';
+    const convId = urlConvId || bridgeConvId || activeConvId || '';
     const convMap = lastBridgeTelemetry?.conversations;
     const telemetry =
       (convId && convMap && typeof convMap === 'object' && convMap[convId]) ||
+      (bridgeConvId && convMap && typeof convMap === 'object' && convMap[bridgeConvId]) ||
+      (activeConvId && convMap && typeof convMap === 'object' && convMap[activeConvId]) ||
       (matchedBridgeTask && matchedBridgeTask.telemetry) ||
       null;
     return { convId, telemetry };
   }
 
+  const lastKnownSidebarProjects = [];
+
+  function isTaskActiveByBreadcrumbOrConv(projectName, title, taskId, convId, breadcrumb) {
+    if (
+      breadcrumb &&
+      breadcrumb.projectName.toLowerCase() === String(projectName || '').toLowerCase() &&
+      matchesBreadcrumbTitle(title, breadcrumb.conversationTitle)
+    ) {
+      return true;
+    }
+    const activeConvId = lastBridgeTelemetry?.activeConvId ? String(lastBridgeTelemetry.activeConvId) : '';
+    const resolvedId = convId || extractConvIdFromTaskId(taskId);
+    return Boolean(activeConvId && resolvedId && resolvedId === activeConvId);
+  }
+
+  function hydrateProjectTasksFromBridgeOrCache(proj, bridgeEntry, breadcrumb, activePaneResult) {
+    if (bridgeEntry && Array.isArray(bridgeEntry.tasks) && bridgeEntry.tasks.length > 0) {
+      proj.tasks = bridgeEntry.tasks.map((bt, idx) => {
+        const taskId = bt.taskId || `item:${proj.projectName}::${bt.title}::${idx}`;
+        const preResolved = resolveTaskTelemetry(taskId, false, bt);
+        const isBcActive = isTaskActiveByBreadcrumbOrConv(
+          proj.projectName,
+          bt.title,
+          taskId,
+          preResolved.convId,
+          breadcrumb
+        );
+        let st = bt.state;
+        let rsn = resolveBridgeReason(bt);
+        if (isBcActive) {
+          if (activePaneResult.state === 'waiting') {
+            st = 'waiting';
+            rsn = activePaneResult.reason;
+          } else if (activePaneResult.state === 'running') {
+            st = 'running';
+            rsn = activePaneResult.reason;
+          } else if (st === 'unread') {
+            st = 'idle';
+          }
+        }
+        const resolved = isBcActive ? resolveTaskTelemetry(taskId, true, bt) : preResolved;
+        return {
+          taskId,
+          convId: resolved.convId,
+          title: bt.title,
+          state: st,
+          confirmedRunning: Boolean(st === 'running' && bt.confirmedDetail),
+          reason: rsn,
+          timeText: bt.timeText || '',
+          isActive: isBcActive,
+          telemetry: resolved.telemetry
+        };
+      });
+      frameCollapsedCache.set(proj.projectName, {
+        knownEmpty: false,
+        projectType: proj.projectType,
+        tasks: proj.tasks.map((t) => ({ ...t }))
+      });
+      return true;
+    }
+
+    if (bridgeEntry?.hasEmptyArray) {
+      proj.knownEmpty = true;
+      frameCollapsedCache.set(proj.projectName, {
+        knownEmpty: true,
+        projectType: proj.projectType,
+        tasks: []
+      });
+      return true;
+    }
+
+    if (frameCollapsedCache.has(proj.projectName)) {
+      const cached = frameCollapsedCache.get(proj.projectName);
+      if (cached.projectType === 'remote') {
+        proj.projectType = 'remote';
+      }
+      if (!cached.knownEmpty && cached.tasks.length > 0) {
+        proj.tasks = cached.tasks.map((ct) => {
+          const isBcActive = isTaskActiveByBreadcrumbOrConv(
+            proj.projectName,
+            ct.title,
+            ct.taskId,
+            ct.convId,
+            breadcrumb
+          );
+          let st = ct.state;
+          let rsn = ct.reason;
+          if (isBcActive) {
+            if (activePaneResult.state === 'waiting') {
+              st = 'waiting';
+              rsn = activePaneResult.reason;
+            } else if (activePaneResult.state === 'running') {
+              st = 'running';
+              rsn = activePaneResult.reason;
+            } else if (st === 'unread') {
+              st = 'idle';
+            }
+          }
+          const resolved = resolveTaskTelemetry(ct.taskId, isBcActive, ct);
+          return {
+            ...ct,
+            convId: resolved.convId || ct.convId || '',
+            telemetry: resolved.telemetry || ct.telemetry || null,
+            isActive: isBcActive,
+            state: st,
+            reason: rsn
+          };
+        });
+      } else if (cached.knownEmpty) {
+        proj.knownEmpty = true;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function scanSidebarHiddenProjects(activePaneResult) {
+    const breadcrumb = detectMainPaneBreadcrumb();
+    const knownNames = lastKnownSidebarProjects.map((p) => p.projectName).filter(Boolean);
+    const bridgeMap = queryMainWorldBridge(knownNames);
+    const projects = [];
+    const seenLower = new Set();
+
+    const addHydratedProject = (projSeed) => {
+      const low = String(projSeed.projectName || '').toLowerCase();
+      if (!low || seenLower.has(low)) return;
+      seenLower.add(low);
+      const bridgeEntry = bridgeMap ? bridgeMap[projSeed.projectName] : null;
+      const proj = {
+        projectName: projSeed.projectName,
+        projectType:
+          bridgeEntry?.projectType === 'remote'
+            ? 'remote'
+            : projSeed.projectType || 'local',
+        headerTaskId: projSeed.headerTaskId || `proj:${projSeed.projectName}`,
+        isCollapsed: Boolean(projSeed.isCollapsed),
+        knownEmpty: Boolean(projSeed.knownEmpty),
+        tasks: []
+      };
+      hydrateProjectTasksFromBridgeOrCache(proj, bridgeEntry, breadcrumb, activePaneResult);
+      projects.push(proj);
+    };
+
+    for (const seed of lastKnownSidebarProjects) {
+      addHydratedProject(seed);
+    }
+    if (bridgeMap && typeof bridgeMap === 'object') {
+      for (const [projName, entry] of Object.entries(bridgeMap)) {
+        addHydratedProject({
+          projectName: projName,
+          projectType: entry?.projectType || 'local',
+          headerTaskId: `proj:${projName}`,
+          isCollapsed: false,
+          knownEmpty: Boolean(entry?.hasEmptyArray)
+        });
+      }
+    }
+    return projects;
+  }
+
   function scanSidebarProjects(activePaneResult) {
     const scope = findSidebarScope();
     if (!scope) {
-      queryMainWorldBridge([]);
+      const hiddenProjects = scanSidebarHiddenProjects(activePaneResult);
+      if (hiddenProjects.length > 0) {
+        return hiddenProjects;
+      }
       return [];
     }
 
@@ -1954,6 +2138,9 @@
                 domTask.state = matched.state;
                 domTask.reason = resolveBridgeReason(matched) || domTask.reason;
               }
+            } else if (matched && domTask.isActive && domTask.state === 'idle' && matched.state === 'running') {
+              domTask.state = 'running';
+              domTask.reason = resolveBridgeReason(matched) || domTask.reason;
             }
             const resolved = resolveTaskTelemetry(domTask.taskId, domTask.isActive, matched);
             domTask.convId = resolved.convId;
@@ -1976,92 +2163,11 @@
         });
         probedProjectNames.add(proj.projectName);
       } else {
-        // 当前项目处于折叠态：优先从 Fiber / QueryCache / 网络桥接器实时读取
-        if (bridgeEntry && Array.isArray(bridgeEntry.tasks) && bridgeEntry.tasks.length > 0) {
-          proj.tasks = bridgeEntry.tasks.map((bt, idx) => {
-            const isBcActive = Boolean(
-              breadcrumb &&
-                breadcrumb.projectName.toLowerCase() === proj.projectName.toLowerCase() &&
-                matchesBreadcrumbTitle(bt.title, breadcrumb.conversationTitle)
-            );
-            let st = bt.state;
-            let rsn = resolveBridgeReason(bt);
-            if (isBcActive) {
-              if (activePaneResult.state === 'waiting') {
-                st = 'waiting';
-                rsn = activePaneResult.reason;
-              } else if (activePaneResult.state === 'running') {
-                st = 'running';
-                rsn = activePaneResult.reason;
-              } else if (st === 'unread') {
-                st = 'idle';
-              }
-            }
-            const taskId = bt.taskId || `item:${proj.projectName}::${bt.title}::${idx}`;
-            const resolved = resolveTaskTelemetry(taskId, isBcActive, bt);
-            return {
-              taskId,
-              convId: resolved.convId,
-              title: bt.title,
-              state: st,
-              confirmedRunning: Boolean(st === 'running' && bt.confirmedDetail),
-              reason: rsn,
-              timeText: bt.timeText || '',
-              isActive: isBcActive,
-              telemetry: resolved.telemetry
-            };
-          });
-          frameCollapsedCache.set(proj.projectName, {
-            knownEmpty: false,
-            projectType: proj.projectType,
-            tasks: proj.tasks.map((t) => ({ ...t }))
-          });
-        } else if (bridgeEntry?.hasEmptyArray) {
-          proj.knownEmpty = true;
-          frameCollapsedCache.set(proj.projectName, {
-            knownEmpty: true,
-            projectType: proj.projectType,
-            tasks: []
-          });
-        } else if (frameCollapsedCache.has(proj.projectName)) {
-          // 机制 2：回退读取本会话展开记忆缓存
-          const cached = frameCollapsedCache.get(proj.projectName);
-          if (cached.projectType === 'remote') {
-            proj.projectType = 'remote';
-          }
-          if (!cached.knownEmpty && cached.tasks.length > 0) {
-            proj.tasks = cached.tasks.map((ct) => {
-              const isBcActive = Boolean(
-                breadcrumb &&
-                  breadcrumb.projectName.toLowerCase() === proj.projectName.toLowerCase() &&
-                  matchesBreadcrumbTitle(ct.title, breadcrumb.conversationTitle)
-              );
-              let st = ct.state;
-              let rsn = ct.reason;
-              if (isBcActive) {
-                if (activePaneResult.state === 'waiting') {
-                  st = 'waiting';
-                  rsn = activePaneResult.reason;
-                } else if (activePaneResult.state === 'running') {
-                  st = 'running';
-                  rsn = activePaneResult.reason;
-                }
-              }
-              const resolved = resolveTaskTelemetry(ct.taskId, isBcActive, ct);
-              return {
-                ...ct,
-                convId: resolved.convId || ct.convId || '',
-                telemetry: resolved.telemetry || ct.telemetry || null,
-                isActive: isBcActive,
-                state: st,
-                reason: rsn
-              };
-            });
-          } else if (cached.knownEmpty) {
-            // 已确认过是空项目（No conversations yet），标记无需显示「已折叠未知」
-            proj.knownEmpty = true;
-          }
-        } else if (!probedProjectNames.has(proj.projectName)) {
+        // 当前项目处于折叠态：优先从 Fiber / QueryCache / 网络桥接器实时读取，其次读取展开记忆缓存
+        if (
+          !hydrateProjectTasksFromBridgeOrCache(proj, bridgeEntry, breadcrumb, activePaneResult) &&
+          !probedProjectNames.has(proj.projectName)
+        ) {
           uncachedCollapsedNames.push(proj.projectName);
         }
       }
@@ -2130,6 +2236,19 @@
             telemetry: activeMeta.telemetry
           });
         }
+      }
+    }
+
+    if (projects.length > 0) {
+      lastKnownSidebarProjects.length = 0;
+      for (const p of projects) {
+        lastKnownSidebarProjects.push({
+          projectName: p.projectName,
+          projectType: p.projectType,
+          headerTaskId: p.headerTaskId,
+          isCollapsed: p.isCollapsed,
+          knownEmpty: p.knownEmpty
+        });
       }
     }
 
@@ -2369,6 +2488,37 @@
         return true;
       }
     }
+
+    // 若整条左侧边栏处于折叠状态，先自动点击展开侧边栏，再展开项目/跳转目标对话
+    const sidebarToggleBtn = document.querySelector(
+      'button[data-testid="sidebar-toggle"][aria-expanded="false"], button[aria-label*="Toggle Sidebar" i][aria-expanded="false"]'
+    );
+    if (sidebarToggleBtn && isElementVisible(sidebarToggleBtn)) {
+      sidebarToggleBtn.click();
+      (async () => {
+        let expandedProj = false;
+        for (let i = 0; i < 16; i++) {
+          await sleepMs(60);
+          scanSidebarProjects(detectActivePaneState());
+          const mounted = findMountedTaskRow(taskId, taskTitle);
+          if (mounted) {
+            clickRowElement(mounted);
+            notifyProbeListeners();
+            return;
+          }
+          if (!expandedProj && projectName) {
+            const escName = CSS.escape ? CSS.escape(projectName) : projectName.replace(/"/g, '\\"');
+            const hdr = document.querySelector(`[data-agy-proj-name="${escName}"]`);
+            if (hdr) {
+              expandedProj = true;
+              clickRowElement(hdr);
+            }
+          }
+        }
+      })();
+      return true;
+    }
+
     return false;
   }
 
