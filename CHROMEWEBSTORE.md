@@ -1,6 +1,6 @@
 # Chrome Web Store & Edge Add-ons Listing Guide
 
-Ready-to-paste store listing copy, permission justifications, privacy declarations, and submission checklist for **Antigravity Tab Status (`v2.9.0`)**.
+Ready-to-paste store listing copy, permission justifications, privacy declarations, and submission checklist for **Antigravity Tab Status (`v2.10.0`)**.
 
 ---
 
@@ -43,9 +43,10 @@ Key Features
   - Vivid Emoji: Clear lightning, checkmark, and bell icons on a contrast disc.
 • 2 Display Modes: Choose a full Standalone Light or overlay a Corner Badge (Standard or Large size) on the original Antigravity icon.
 • Cross-Tab Overview, Persistent Side Panel & Quick Jump: Click the toolbar icon from any webpage to monitor all open Antigravity tabs (and global Waiting + Unread badge count), open the persistent Chrome Side Panel anytime, mark everything read, or click any conversation to switch to its tab and jump straight to it.
-• 5-Hour Model Quota Pools & Live Context Telemetry: View remaining 5-hour quota across Gemini and Claude / GPT pools with reset countdowns, per-chat context token usage, live tok/s streaming speed, and auto-compaction drop indicators.
-• Optional In-Page Composer Capsule (Off by Default): Enable an isolated Shadow DOM usage capsule next to Antigravity's composer controls with a keyboard- and hover-accessible breakdown tooltip (tokens, tok/s, prompt cache hit rate, compaction alerts, and 5h quota).
-• Optional Localhost Desktop Support: Grant optional access to localhost / 127.0.0.1 anytime from settings to monitor local Antigravity desktop webviews while leaving unrelated local dev servers untouched.
+• 5-Hour Model Quota Pools & Live Context Telemetry: View remaining 5-hour quota, burn-rate Pace badges, depletion ETA, and reset countdowns across Gemini and Claude / GPT pools, plus per-chat context token usage, live tok/s streaming speed, auto-compaction drop indicators, and 5m/1h prompt-cache freshness countdowns.
+• On-Device Token Ledger & Offline Pricing Analytics: Inspect Today / 7d / 30d token totals, SVG trend charts, a 28-day activity heatmap, Top Models & Projects, and USD / CNY equivalent API cost & cache-savings estimates computed 100% offline with JSON / CSV export and 1-click history clearing.
+• Optional Desktop Quota Alerts & In-Page Composer Capsule (Both Off by Default): Opt in to local desktop notifications when a depleted 5h quota pool recovers or spare quota nears reset, or mount an isolated Shadow DOM usage pill next to Antigravity's composer controls.
+• Optional Localhost Desktop & Magpie Support: Grant optional access to localhost / 127.0.0.1 anytime from settings to monitor local Antigravity desktop webviews (leaving unrelated local dev servers untouched) or view read-only summaries from an opt-in local Magpie gateway.
 • Configurable Toolbar Click Action: Choose whether clicking the toolbar icon opens the quick Popup (with a header button to launch the Side Panel) or opens the Chrome Side Panel directly.
 • Accessibility & Motion Safe: Automatically pauses animations when Reduced Motion is enabled, supports High Contrast mode and light/dark themes, and keeps attention pulses below 3 flashes per second.
 • Automatic 10-Language Support: Automatically follows your browser UI language across English, Simplified Chinese, Traditional Chinese, Japanese, Korean, Spanish, French, German, Portuguese (Brazil), and Russian.
@@ -75,9 +76,10 @@ Antigravity Tab Status 让浏览器标签页图标化身为清晰灵动的动态
   - 灵动 Emoji：高清闪电、对勾与铃铛图标。
 • 2 种展示模式：支持「独立状态灯」或「原图标角标（标准 / 大号）」，满足不同标签页密度习惯。
 • 跨网页全局概览、常驻侧边栏与一键直达：无论当前浏览什么网页，点击扩展图标即可查看后台全部 Antigravity 标签页的汇总状态（及工具栏全局角标计数），随时一键打开浏览器常驻侧边栏（Side Panel），支持一键全部标为已读，点击任意对话即可自动激活对应标签页并精准定位。
-• 5 小时模型配额池与上下文 / 速率遥测：在面板顶部直观展示 Gemini 与 Claude / GPT 的 5 小时剩余配额与重置倒计时，并在每个对话下显示上下文 Token 占用、实时 tok/s 生成速率与自动压缩提示。
-• 可选页内输入框用量胶囊（默认关闭）：按需开启后可在输入框旁挂载隔离的 Shadow DOM 用量胶囊，支持悬停与键盘查看上下文明细、缓存命中率、自动压缩与配额状态。
-• 可选本地桌面端（localhost）支持：可在设置中按需授予 localhost / 127.0.0.1 可选访问权限以监控本地 Antigravity 桌面 WebView，对无关本地开发服务完全静默。
+• 5 小时模型配额池与上下文 / 速率 / 缓存保鲜遥测：在面板顶部展示 Gemini 与 Claude / GPT 的 5 小时剩余配额、消耗速率 Pace 徽标、耗尽 ETA 与重置倒计时，并在对话下展示上下文 Token 占用、实时 tok/s 速率、自动压缩降幅与 5m/1h 缓存保鲜倒计时。
+• 本地持久化用量账本与离线计价分析抽屉：在本地查看今日 / 7 天 / 30 天用量 KPI、SVG 趋势图、28 天热力图、热门模型与项目排行，支持 100% 离线 USD / CNY 等效费用与缓存节省估算、JSON / CSV 导出及一键清空历史。
+• 可选桌面配额提醒与页内输入框胶囊（均默认关闭）：可按需启用本地桌面配额恢复/重置余量提醒，或在输入框旁挂载隔离的 Shadow DOM 用量胶囊查看详细遥测。
+• 可选本地桌面端（localhost）与只读本地 Magpie 网关支持：可在设置中按需授予 localhost / 127.0.0.1 可选权限以监控本地 Antigravity 桌面 WebView（对无关本地开发服务完全静默），或查看受检本地 Magpie 网关的只读摘要。
 • 工具栏点击行为可调：支持在高级设置中自由切换工具栏图标默认打开「快捷弹窗」或直接打开「侧边栏」。
 • 无障碍与视觉安全：自动遵循系统「减弱动态效果」与高对比度设置，自适应浅色/深色外观，提醒脉冲严格低于每秒 3 次。
 • 10 国语言自动适配：自动跟随浏览器语言切换界面与状态说明，支持简体中文、繁体中文、英语、日语、韩语、西班牙语、法语、德语、巴西葡萄牙语与俄语。
@@ -99,7 +101,12 @@ Displays real-time workspace conversation status lights on Google Antigravity br
 
 ### `storage` Permission Justification
 ```text
-Used via chrome.storage.sync to remember user display preferences (master enable switch, chosen status light style, mount layout, corner badge size, toolbar click mode, collapsed-project auto-sync toggle, quota/context display toggles, opt-in in-page capsule toggle, and optional user-defined CSS selectors) across browser restarts, and via in-memory chrome.storage.session solely to aggregate temporary Waiting + Unread counts into the toolbar badge while tabs are open.
+Used via chrome.storage.sync to remember user display preferences (master enable switch, chosen status light style, mount layout, corner badge size, toolbar click mode, collapsed-project auto-sync toggle, quota/context display toggles, opt-in in-page capsule toggle, opt-in quota notifications toggle, and optional user-defined CSS selectors) across browser restarts; via memory-only chrome.storage.session solely to aggregate temporary Waiting + Unread counts into the toolbar badge and hold a 30-second read-only Magpie response cache while tabs are open; and via device-local chrome.storage.local strictly for aggregated non-text token usage counters (agyUsageLedgerV1, 90-day auto-prune, < 250 KB cap), offline pricing rates (agyPricingConfigV1), quota notification deduplication watermarks (agyNotifStateV1), and opt-in local Magpie loopback settings (agyMagpieConfigV1).
+```
+
+### `optional_permissions` (`notifications`) Justification
+```text
+Requested strictly on explicit user click when enabling Quota desktop alerts (off by default) via chrome.permissions.request({ permissions: ['notifications'] }) to show local desktop notifications when a depleted 5-hour quota pool recovers or when significant unused quota is nearing reset, and revocable anytime via Disable.
 ```
 
 ### `sidePanel` Permission Justification
@@ -139,7 +146,7 @@ Check **No — I am not collecting any user data**, and ensure every data-collec
 | Field / Requirement | Value / Status |
 | :--- | :--- |
 | **Extension Name** | `Antigravity Tab Status` (localized via `_locales/*/messages.json`) |
-| **Version** | `2.9.0` |
+| **Version** | `2.10.0` |
 | **Primary Category** | `Developer Tools` (alternative: `Productivity`) |
 | **Default Language** | `English` (`default_locale: "en"`, with 9 additional localized store locales available via `_locales/`) |
 | **Developer Contact Email** | `[YOUR_STORE_CONTACT_EMAIL]` *(fill in manually in Developer Dashboard before submitting)* |
@@ -149,4 +156,4 @@ Check **No — I am not collecting any user data**, and ensure every data-collec
 | **Store Icon (128×128 PNG)** | Ready: [`icons/icon128.png`](./icons/icon128.png) (non-alpha transparency issues should be verified if uploading to store icon slot) |
 | **Screenshots (1280×800 or 640×400 PNG/JPG)** | **TODO before upload:** Capture at least 1 (recommended 3–5) `1280x800` screenshots showcasing: (1) tab lights across Running/Unread/Waiting, (2) popup 2x3 theme picker & project jump list, (3) dark/light adaptive UI & badge layout |
 | **Small Promo Tile (440×280 PNG/JPG)** | Optional (recommended for featuring) |
-| **Upload Package (`.zip`)** | Generate clean release archive with `bash scripts/package.sh` -> `dist/antigravity-tab-status-v2.9.0.zip` |
+| **Upload Package (`.zip`)** | Generate clean release archive with `bash scripts/package.sh` -> `dist/antigravity-tab-status-v2.10.0.zip` |

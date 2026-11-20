@@ -13,7 +13,7 @@
       <div class="brand">
         <img src="icons/icon32.png" alt="" width="28" height="28" class="brand-logo" />
         <div class="brand-text">
-          <h1 class="brand-title"><span data-i18n="brandTitle">Antigravity Tab Status</span> <span class="ver">v2.9.0</span></h1>
+          <h1 class="brand-title"><span data-i18n="brandTitle">Antigravity Tab Status</span> <span class="ver">v2.10.0</span></h1>
           <p class="brand-subtitle" data-i18n="brandSubtitle">Pure tab status lights · Waiting / Unread first</p>
         </div>
       </div>
@@ -40,7 +40,36 @@
     </header>
 
     <main class="main-content">
-      <div id="instanceBar" class="instance-bar hidden"></div>
+      <div id="instanceBar" class="instance-bar hidden" role="region">
+        <div id="instanceSingleInfo" class="instance-connected-main hidden">
+          <span id="instanceSingleDot" class="instance-mini-dot"></span>
+          <span id="instanceSingleLabel" class="instance-connected-label"></span>
+        </div>
+        <div id="hostSwitcherWrap" class="host-switcher hidden">
+          <button
+            id="hostMenuTrigger"
+            class="host-select-trigger"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            aria-controls="hostMenuPopover"
+            commandfor="hostMenuPopover"
+            command="toggle-popover"
+          >
+            <span id="hostTriggerDot" class="instance-mini-dot"></span>
+            <span id="hostTriggerLabel" class="host-trigger-label"></span>
+            <span id="hostTriggerCount" class="host-trigger-count hidden"></span>
+            <span class="host-trigger-chevron" aria-hidden="true"></span>
+          </button>
+          <div id="hostMenuPopover" class="host-menu-popover" popover="auto">
+            <div id="hostMenuList" class="host-menu-list" focusgroup="menu nomemory"></div>
+          </div>
+        </div>
+        <button id="instanceJumpBtn" class="instance-jump-btn hidden" type="button" data-i18n-title="switchToTabTitle" title="Jump to this Antigravity browser tab">
+          <span id="instanceJumpLabel" data-i18n="switchToTabBtn">Switch tab</span>
+          <span class="jump-glyph" aria-hidden="true"></span>
+        </button>
+      </div>
 
       <!-- Global status summary card -->
       <section id="statusCard" class="card status-card" aria-labelledby="statusLabel">
@@ -100,6 +129,213 @@
 
         <ul id="projectsList" class="projects-list" role="list"></ul>
       </section>
+
+      <!-- Token usage & equivalent API cost analytics drawer (default collapsed) -->
+      <details id="usageDrawer" class="card usage-drawer">
+        <summary class="advanced-summary usage-summary">
+          <span class="summary-text" data-i18n="usageDrawerSummary">Token Usage &amp; Cost</span>
+          <span id="usageSummaryPill" class="usage-summary-pill">--</span>
+        </summary>
+        <div class="usage-body">
+          <div class="usage-toolbar">
+            <div class="segmented mini" id="usagePeriodGroup" role="group" data-i18n-aria-label="usagePeriodAria" aria-label="Usage time range">
+              <button type="button" class="seg-btn active" data-period="today" aria-pressed="true" data-i18n="usagePeriodToday">Today</button>
+              <button type="button" class="seg-btn" data-period="7d" aria-pressed="false" data-i18n="usagePeriod7d">7d</button>
+              <button type="button" class="seg-btn" data-period="30d" aria-pressed="false" data-i18n="usagePeriod30d">30d</button>
+            </div>
+            <div class="segmented mini" id="usageCurrencyGroup" role="group" data-i18n-aria-label="usageCurrencyAria" aria-label="Display currency">
+              <button type="button" class="seg-btn active" data-currency="USD" aria-pressed="true">USD</button>
+              <button type="button" class="seg-btn" data-currency="CNY" aria-pressed="false">CNY</button>
+            </div>
+          </div>
+
+          <div id="usageKpiGrid" class="usage-kpi-grid">
+            <div class="usage-kpi-card">
+              <span class="usage-kpi-label" data-i18n="usageKpiTokensLabel">Total Tokens</span>
+              <strong id="kpiTokensVal" class="usage-kpi-val">0</strong>
+              <span id="kpiTokensSub" class="usage-kpi-sub">--</span>
+            </div>
+            <div class="usage-kpi-card">
+              <span class="usage-kpi-label" data-i18n="usageKpiCostLabel">Equiv. API Cost</span>
+              <strong id="kpiCostVal" class="usage-kpi-val">$0.00</strong>
+              <span id="kpiCostSub" class="usage-kpi-sub">--</span>
+            </div>
+            <div class="usage-kpi-card">
+              <span class="usage-kpi-label" data-i18n="usageKpiCacheLabel">Cache Hit Rate</span>
+              <strong id="kpiCacheVal" class="usage-kpi-val">0%</strong>
+              <span id="kpiCacheSub" class="usage-kpi-sub">--</span>
+            </div>
+            <div class="usage-kpi-card">
+              <span class="usage-kpi-label" data-i18n="usageKpiSpeedLabel">Throughput</span>
+              <strong id="kpiSpeedVal" class="usage-kpi-val">--</strong>
+              <span id="kpiSpeedSub" class="usage-kpi-sub">--</span>
+            </div>
+          </div>
+
+          <div class="usage-viz-grid">
+            <div class="usage-viz-box">
+              <div class="usage-subhead">
+                <span id="usageTrendTitle" class="usage-subtitle">24h Hourly Trend</span>
+                <span id="usageTrendPeak" class="usage-submeta"></span>
+              </div>
+              <div id="usageTrendWrap" class="usage-trend-wrap"></div>
+            </div>
+            <div class="usage-viz-box">
+              <div class="usage-subhead">
+                <span class="usage-subtitle" data-i18n="usageHeatmapTitle">28-Day Activity</span>
+                <span id="usageHeatmapMeta" class="usage-submeta"></span>
+              </div>
+              <div id="usageHeatmapGrid" class="usage-heatmap-grid" role="img" data-i18n-aria-label="usageHeatmapAria" aria-label="28-day token activity heatmap"></div>
+            </div>
+          </div>
+
+          <div id="usageEmptyNote" class="usage-empty-note hidden"></div>
+
+          <div id="usageRankGrid" class="usage-rank-grid">
+            <div class="usage-rank-col">
+              <h3 class="usage-subtitle" data-i18n="usageTopModelsTitle">Top Models</h3>
+              <ul id="usageTopModelsList" class="usage-rank-list" role="list"></ul>
+            </div>
+            <div class="usage-rank-col">
+              <h3 class="usage-subtitle" data-i18n="usageTopProjectsTitle">Top Projects</h3>
+              <ul id="usageTopProjectsList" class="usage-rank-list" role="list"></ul>
+            </div>
+          </div>
+
+          <div id="magpieLiveCard" class="magpie-live-card hidden">
+            <div class="magpie-head">
+              <span class="usage-subtitle" data-i18n="magpieCardTitle">Magpie CLI Gateway (Read-Only)</span>
+              <div class="magpie-head-right">
+                <span id="magpieStatusPill" class="magpie-status-pill is-offline">Offline</span>
+                <button
+                  type="button"
+                  id="magpieRefreshBtn"
+                  class="header-icon-btn magpie-refresh-btn"
+                  data-i18n-aria-label="magpieRefreshBtnAria"
+                  data-i18n-title="magpieRefreshBtnAria"
+                  aria-label="Refresh Magpie gateway data"
+                  title="Refresh Magpie gateway data"
+                >
+                  <span class="sync-glyph" aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+            <p id="magpieSummaryLine" class="magpie-summary-line hidden"></p>
+            <p id="magpieOfflineNote" class="magpie-offline-note hidden"></p>
+            <div id="magpieAgentsSection" class="usage-rank-col hidden">
+              <h3 class="usage-subtitle" data-i18n="magpieAgentsTitle">CLI Agents</h3>
+              <ul id="magpieAgentsList" class="usage-rank-list" role="list"></ul>
+            </div>
+            <div id="magpieQuotasSection" class="magpie-quotas-wrap hidden">
+              <h3 class="usage-subtitle" data-i18n="magpieQuotasTitle">Gateway Quotas</h3>
+              <div id="magpieQuotasList" class="magpie-quota-pills"></div>
+            </div>
+          </div>
+
+          <details id="magpiePanel" class="usage-rates-subpanel">
+            <summary class="usage-rates-summary">
+              <span data-i18n="magpiePanelSummary">Local Magpie Gateway (Optional)</span>
+            </summary>
+            <div class="usage-rates-body">
+              <div class="compact-row toggle-row">
+                <div class="row-label-stack">
+                  <span id="magpieToggleLabel" class="row-label" data-i18n="magpieToggleLabel">Read-only CLI usage sync</span>
+                  <span id="magpieToggleHint" class="row-hint" data-i18n="magpieToggleHint">Polls local Magpie (/v1/magpie/*) without modifying extension ledger</span>
+                </div>
+                <button
+                  type="button"
+                  id="magpieToggleBtn"
+                  class="mini-sync-btn"
+                  data-i18n="magpieEnableBtn"
+                  aria-labelledby="magpieToggleLabel magpieToggleBtn"
+                  aria-describedby="magpieToggleHint"
+                  aria-pressed="false"
+                >Enable</button>
+              </div>
+              <div class="field-group">
+                <label for="magpieUrlInput" data-i18n="magpieUrlLabel">Loopback endpoint (http://127.0.0.1 or localhost)</label>
+                <input
+                  type="url"
+                  id="magpieUrlInput"
+                  class="rate-custom-input magpie-url-input"
+                  data-i18n-placeholder="magpieUrlPlaceholder"
+                  placeholder="http://127.0.0.1:3425"
+                  value="http://127.0.0.1:3425"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="save-row">
+                <span id="magpieFeedback" class="save-feedback" role="status" aria-live="polite"></span>
+                <div class="save-right">
+                  <button type="button" id="magpieSaveUrlBtn" class="secondary-btn" data-i18n="magpieSaveUrlBtn">Save Endpoint</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details id="usageRatesPanel" class="usage-rates-subpanel">
+            <summary class="usage-rates-summary">
+              <span data-i18n="usageRatesSummary">Custom Rates &amp; FX (Offline)</span>
+            </summary>
+            <div class="usage-rates-body">
+              <div class="compact-row">
+                <label for="usdToCnyInput" class="row-label" data-i18n="usageFxLabel">USD → CNY rate</label>
+                <input type="number" id="usdToCnyInput" class="rate-num-input fx-input" min="0.5" max="50" step="0.01" value="7.25" />
+              </div>
+              <div class="field-group">
+                <label id="rateModelLabel" for="rateModelSelect" data-i18n="usageRateModelLabel">Model pricing override (USD / 1M)</label>
+                <select id="rateModelSelect" class="rate-select"></select>
+                <input type="text" id="rateCustomModelInput" class="rate-custom-input hidden" aria-labelledby="rateModelLabel" data-i18n-placeholder="usageRateCustomPlaceholder" placeholder="e.g. claude-sonnet-4-6" spellcheck="false" />
+              </div>
+              <div class="rate-fields-grid">
+                <div class="rate-field">
+                  <label for="rateInInput" data-i18n="usageRateInLabel">Input</label>
+                  <input type="number" id="rateInInput" class="rate-num-input" min="0" max="10000" step="0.001" />
+                </div>
+                <div class="rate-field">
+                  <label for="rateCrInput" data-i18n="usageRateCrLabel">Cache Read</label>
+                  <input type="number" id="rateCrInput" class="rate-num-input" min="0" max="10000" step="0.001" />
+                </div>
+                <div class="rate-field">
+                  <label for="rateCw5mInput" data-i18n="usageRateCw5mLabel">Write 5m</label>
+                  <input type="number" id="rateCw5mInput" class="rate-num-input" min="0" max="10000" step="0.001" />
+                </div>
+                <div class="rate-field">
+                  <label for="rateCw1hInput" data-i18n="usageRateCw1hLabel">Write 1h</label>
+                  <input type="number" id="rateCw1hInput" class="rate-num-input" min="0" max="10000" step="0.001" />
+                </div>
+                <div class="rate-field">
+                  <label for="rateOutInput" data-i18n="usageRateOutLabel">Output</label>
+                  <input type="number" id="rateOutInput" class="rate-num-input" min="0" max="10000" step="0.001" />
+                </div>
+              </div>
+              <div id="activeOverridesList" class="override-chips hidden"></div>
+              <div class="save-row">
+                <button type="button" id="resetRateOverrideBtn" class="ghost-btn hidden" data-i18n="usageRateResetBtn">Reset Model</button>
+                <div class="save-right">
+                  <button type="button" id="saveRateOverrideBtn" class="secondary-btn" data-i18n="usageRateSaveBtn">Save Rates</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <div class="usage-actions-row">
+            <div class="usage-export-group">
+              <button type="button" id="exportJsonBtn" class="ghost-btn" data-i18n="usageExportJsonBtn">Export JSON</button>
+              <button type="button" id="exportCsvBtn" class="ghost-btn" data-i18n="usageExportCsvBtn">Export CSV</button>
+            </div>
+            <div class="usage-clear-area">
+              <span id="usageFeedback" class="save-feedback" role="status" aria-live="polite"></span>
+              <button type="button" id="clearUsageBtn" class="ghost-btn danger-ghost-btn" data-i18n="usageClearBtn">Clear History</button>
+              <div id="clearUsageConfirmWrap" class="clear-confirm-wrap hidden">
+                <span class="clear-confirm-text" data-i18n="usageClearConfirmPrompt">Clear local usage?</span>
+                <button type="button" id="clearUsageConfirmBtn" class="danger-btn" data-i18n="usageClearConfirmYes">Confirm</button>
+                <button type="button" id="clearUsageCancelBtn" class="ghost-btn" data-i18n="usageClearConfirmCancel">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
 
       <!-- Settings, live preview & diagnostics -->
       <details class="card advanced-panel">
@@ -254,6 +490,22 @@
             >Enable</button>
           </div>
 
+          <div id="quotaNotifyRow" class="compact-row toggle-row">
+            <div class="row-label-stack">
+              <span id="quotaNotifyLabel" class="row-label" data-i18n="quotaNotifyLabel">Quota desktop alerts</span>
+              <span id="quotaNotifyHint" class="row-hint" data-i18n="quotaNotifyHint">Optional alert when depleted 5h quota resets or spare quota is expiring</span>
+            </div>
+            <button
+              type="button"
+              id="quotaNotifyBtn"
+              class="mini-sync-btn"
+              data-i18n="quotaNotifyEnableBtn"
+              aria-labelledby="quotaNotifyLabel quotaNotifyBtn"
+              aria-describedby="quotaNotifyHint"
+              aria-pressed="false"
+            >Enable</button>
+          </div>
+
           <div id="previewBlock" class="preview-block">
             <span id="previewBlockLabel" class="row-label" data-i18n="previewLabel">Live preview tab status light</span>
             <div class="preview-grid" role="group" aria-labelledby="previewBlockLabel">
@@ -313,6 +565,7 @@
   </div>
 
   <script src="i18n.js"></script>
+  <script src="pricing.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [2.10.0] — Token Usage Ledger, Offline Pricing & Analytics, Quota Pace/Alerts, Cache Freshness & Local Magpie Integration
+
+### Added
+- **Dual-Track Session Token Telemetry & 5h Quota Pace / ETA (`page-bridge.js`, `scanner.js`, `content.js`, `popup.js`, `popup.css`):**
+  - Extended `extractStepModelUsage()` and `analyzeConversationSteps()` with `reasoningTokens` (preserving disjoint vs. nested-detail deduplication), tiered `5m`/`1h` prompt-cache write tokens (`cacheWrite5mTokens`, `cacheWrite1hTokens`), observed step `durationMs` / `ttftMs`, eviction-safe cumulative `session*` counters across `MAX_STEPS_PER_CONV` splices, and isolated `subagentTotalTokens` for shadow/subagent steps.
+  - Added ring-buffer slope depletion `etaMs`, `paceRatio`, `paceStatus` (`comfortable` / `balanced` / `fast`), and pre-reset unused quota hints (`unusedPreResetHint`) inside `#quotaStrip`, plus richer hover tooltips and Shadow DOM capsule breakdowns.
+- **Shared Offline Pricing Engine & Persistent Usage Ledger (`pricing.js`, `background.js`, `popup.html`, `sidepanel.html`, `popup.js`, `popup.css`):**
+  - Added `pricing.js` (`globalThis.__AGY_PRICING__`) with 100% offline USD `/ 1M` pricing catalog, model alias normalization, `USD`/`CNY` conversion, per-model custom rate overrides (`chrome.storage.local["agyPricingConfigV1"]`), prompt-cache savings calculation, and session cost/savings tooltips.
+  - Added high-watermark deduplicated on-device usage ledger (`chrome.storage.local["agyUsageLedgerV1"]`) capped at `300` LRU conversation watermarks, `90`-day rolling retention, and `< 240 KB` serialized size, serialized via an async write lock in `background.js` and protected against storage quota overflows.
+  - Added collapsible `<details id="usageDrawer" class="card usage-drawer">` analytics drawer with `Today | 7d | 30d` range switch, `USD | CNY` currency toggle, 4 KPI cards, SVG trend bar chart + 28-day activity heatmap, Top Models / Top Projects ranked bars, custom pricing overrides, RFC 4180 + CWE-1236 formula-safe CSV / JSON export, and 2-step inline `Clear History` confirmation.
+- **Opt-In Desktop 5h Quota Notifications (`manifest.json`, `pricing.js`, `background.js`, `content.js`, `popup.html`, `sidepanel.html`, `popup.js`):**
+  - Added `"optional_permissions": ["notifications"]` and `quotaNotifications` (`false` by default) gated by synchronous `chrome.permissions.request({ permissions: ['notifications'] })`.
+  - Added sleep-resilient, multi-tab deduplicated allowance-back recovery and pre-reset unused quota reminders persisted in `chrome.storage.local["agyNotifStateV1"]`.
+- **Prompt Cache `5m` / `1h` `coldAfter` Freshness Countdown (`page-bridge.js`, `pricing.js`, `scanner.js`, `popup.js`, `popup.css`):**
+  - Added `evaluateCacheFreshness()` transitioning through `warm`, `cooling`, and `cold` states in conversation rows (with focus-preserving in-place countdown updates) and inside the opt-in Shadow DOM composer capsule.
+- **Optional Read-Only Local `magpie` Gateway Integration (`pricing.js`, `background.js`, `popup.html`, `sidepanel.html`, `popup.js`, `popup.css`):**
+  - Added opt-in (`agyMagpieConfigV1.enabled = false` by default) loopback-only `GET` polling (`validateMagpieBaseUrl`, `credentials: 'omit'`, `redirect: 'error'`, `1800ms` timeout, `30s` session cache in `agyMagpieCacheV1`) rendering an isolated `#magpieLiveCard` inside `#usageDrawer` without ever mutating `agyUsageLedgerV1`.
+- **282-Key 10-Locale Parity, Privacy Updates & Release Automation (`i18n.js`, `PRIVACY.md`, `scripts/verify.mjs`, `scripts/package.sh`, `.github/workflows/release.yml`):**
+  - Expanded `i18n.js` from 161 to 282 canonical keys across all 10 locales with Service Worker `globalThis.__AGY_I18N__` support, updated `PRIVACY.md` and `scripts/verify.mjs` (including `pricing.js` sandbox & Magpie loopback validation), packaged `26` runtime files via `scripts/package.sh`, and added `.github/workflows/release.yml` for tag-triggered GitHub Releases.
+
+---
+
 ## [2.9.0] — 5h Model Quota Pools, Context & Speed Telemetry, In-Page Capsule & Localhost Mode
 
 ### Added

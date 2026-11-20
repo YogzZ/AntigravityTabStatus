@@ -35,7 +35,32 @@
   let lastSnapshotHash = '';
   let domObserver = null;
   let heartbeatId = null;
+  let timerPort = null;
+  let portReconnectTimer = null;
+  let portReconnectAttempt = 0;
+  let pollTickCount = 0;
   let capsuleConfig = { enabled: true, showInPageCapsule: false };
+  const PRICING_CONFIG_STORAGE_KEY =
+    window.__AGY_PRICING__?.PRICING_CONFIG_STORAGE_KEY || 'agyPricingConfigV1';
+  let pricingConfig =
+    window.__AGY_PRICING__?.normalizePricingConfig?.(null) || {
+      version: 1,
+      currency: 'USD',
+      usdToCnyRate: 7.25,
+      overrides: {}
+    };
+
+  const LEDGER_FLUSH_DEBOUNCE_MS = 5000;
+  const LEDGER_FLUSH_MAX_WAIT_MS = 15000;
+  const childLedgerMeta = new Map();
+  const childLedgerCursor = Object.create(null);
+  const childClearedFloorByConv = Object.create(null);
+  let latestChildProjects = [];
+  let latestChildTelemetry = null;
+  let childLedgerDirty = false;
+  let childLedgerDebounceId = null;
+  let childLedgerMaxWaitId = null;
+  let childLedgerFlushInFlight = false;
 
   function isContextAlive() {
     try {
@@ -55,30 +80,260 @@
       clearInterval(heartbeatId);
       heartbeatId = null;
     }
+    if (portReconnectTimer !== null) {
+      clearTimeout(portReconnectTimer);
+      portReconnectTimer = null;
+    }
+    if (childLedgerDebounceId !== null) {
+      clearTimeout(childLedgerDebounceId);
+      childLedgerDebounceId = null;
+    }
+    if (childLedgerMaxWaitId !== null) {
+      clearTimeout(childLedgerMaxWaitId);
+      childLedgerMaxWaitId = null;
+    }
+    if (timerPort) {
+      try {
+        timerPort.disconnect();
+      } catch {}
+      timerPort = null;
+    }
     return true;
+  }
+
+  function schedulePortReconnect() {
+    if (portReconnectTimer !== null || shutdownIfInvalidated()) return;
+    const delays = [250, 1000, 2500];
+    const delay = delays[Math.min(portReconnectAttempt, delays.length - 1)];
+    portReconnectAttempt++;
+    portReconnectTimer = setTimeout(() => {
+      portReconnectTimer = null;
+      if (!shutdownIfInvalidated()) {
+        ensurePollPort();
+      }
+    }, delay);
+  }
+
+  function ensurePollPort() {
+    if (timerPort) return timerPort;
+    if (shutdownIfInvalidated()) return null;
+    try {
+      const port = chrome.runtime.connect({ name: 'agy-timer' });
+      portReconnectAttempt = 0;
+      port.onMessage.addListener((msg) => {
+        if (!msg || msg.type !== 'POLL_TICK') return;
+        pollTickCount++;
+        runWithTimestamp(pollTickCount % 4 === 0);
+      });
+      port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+        timerPort = null;
+        schedulePortReconnect();
+      });
+      timerPort = port;
+      try {
+        port.postMessage({ cmd: 'START_POLL', intervalMs: 1000 });
+      } catch {}
+      return port;
+    } catch {
+      timerPort = null;
+      schedulePortReconnect();
+      return null;
+    }
+  }
+
+  function clearChildLedgerTimers() {
+    if (childLedgerDebounceId !== null) {
+      clearTimeout(childLedgerDebounceId);
+      childLedgerDebounceId = null;
+    }
+    if (childLedgerMaxWaitId !== null) {
+      clearTimeout(childLedgerMaxWaitId);
+      childLedgerMaxWaitId = null;
+    }
+  }
+
+  function scheduleChildLedgerFlush() {
+    if (shutdownIfInvalidated()) return;
+    if (childLedgerDebounceId !== null) {
+      clearTimeout(childLedgerDebounceId);
+    }
+    childLedgerDebounceId = setTimeout(() => {
+      childLedgerDebounceId = null;
+      void flushChildLedgerDeltasNow();
+    }, LEDGER_FLUSH_DEBOUNCE_MS);
+    if (childLedgerMaxWaitId === null) {
+      childLedgerMaxWaitId = setTimeout(() => {
+        childLedgerMaxWaitId = null;
+        void flushChildLedgerDeltasNow();
+      }, LEDGER_FLUSH_MAX_WAIT_MS);
+    }
+  }
+
+  function noteChildLedgerTelemetry(projects, telemetry) {
+    latestChildProjects = Array.isArray(projects) ? projects : [];
+    latestChildTelemetry = telemetry || null;
+    const convs =
+      telemetry?.conversations && typeof telemetry.conversations === 'object'
+        ? telemetry.conversations
+        : null;
+    if (!convs) return;
+
+    let changed = false;
+    for (const [convId, conv] of Object.entries(convs)) {
+      if (
+        !convId ||
+        convId.length < 6 ||
+        convId.length > 160 ||
+        convId.startsWith('composer-panel-')
+      ) {
+        continue;
+      }
+      if (conv?.precision !== 'exact') continue;
+      const pricedCount = Number(conv.sessionStepPricedCount) || 0;
+      const sessionTotal = Number(conv.sessionTotalTokens) || 0;
+      if (pricedCount <= 0 || sessionTotal <= 0) continue;
+
+      const prev = childLedgerMeta.get(convId);
+      const stepHint = Math.max(0, (Number(conv.stepCount) || 1) - 1);
+      if (!prev || prev.pricedCount !== pricedCount || prev.sessionTotal !== sessionTotal) {
+        childLedgerMeta.set(convId, {
+          maxIdx: Math.max(prev?.maxIdx ?? 0, stepHint),
+          sessionTotal,
+          pricedCount
+        });
+        changed = true;
+      }
+    }
+    if (changed) {
+      childLedgerDirty = true;
+      scheduleChildLedgerFlush();
+    }
+  }
+
+  function flushChildLedgerDeltasNow({ syncOnly = false } = {}) {
+    if (shutdownIfInvalidated()) return;
+    clearChildLedgerTimers();
+    if (childLedgerFlushInFlight && !syncOnly) return;
+
+    const rawBatches =
+      window.__AGY_SCANNER__?.harvestLedgerDeltas?.(childLedgerCursor, latestChildProjects) || [];
+    childLedgerDirty = false;
+    if (!Array.isArray(rawBatches) || rawBatches.length === 0) return;
+
+    const batches = [];
+    const batchMaxByConv = Object.create(null);
+    for (const batch of rawBatches) {
+      if (!batch?.convId || !Array.isArray(batch.steps)) continue;
+      const floor = typeof childClearedFloorByConv[batch.convId] === 'number' ? childClearedFloorByConv[batch.convId] : -1;
+      const filteredSteps = floor >= 0 ? batch.steps.filter((st) => typeof st?.idx === 'number' && st.idx > floor) : batch.steps;
+      if (filteredSteps.length === 0) continue;
+      let maxIdx = -1;
+      for (const st of filteredSteps) {
+        if (typeof st?.idx === 'number' && st.idx > maxIdx) maxIdx = st.idx;
+      }
+      if (maxIdx >= 0) {
+        batchMaxByConv[batch.convId] = maxIdx;
+      }
+      batches.push({ ...batch, steps: filteredSteps });
+    }
+    if (batches.length === 0) return;
+
+    const payload = {
+      type: 'INGEST_USAGE_DELTAS',
+      batches
+    };
+
+    try {
+      if (syncOnly) {
+        chrome.runtime.sendMessage(payload, () => {
+          void chrome.runtime.lastError;
+        });
+        return;
+      }
+      childLedgerFlushInFlight = true;
+      chrome.runtime.sendMessage(payload, (resp) => {
+        childLedgerFlushInFlight = false;
+        if (!chrome.runtime.lastError && resp?.ok === true) {
+          for (const [cid, maxIdx] of Object.entries(batchMaxByConv)) {
+            childLedgerCursor[cid] = Math.max(childLedgerCursor[cid] ?? -1, maxIdx);
+          }
+        } else {
+          childLedgerDirty = true;
+        }
+      });
+    } catch {
+      childLedgerFlushInFlight = false;
+      childLedgerDirty = true;
+    }
+  }
+
+  function handleChildLedgerCleared() {
+    clearChildLedgerTimers();
+    childLedgerDirty = false;
+    try {
+      const allBatches =
+        window.__AGY_SCANNER__?.harvestLedgerDeltas?.({}, latestChildProjects) || [];
+      for (const batch of allBatches) {
+        if (!batch?.convId || !Array.isArray(batch.steps)) continue;
+        let maxIdx = -1;
+        for (const st of batch.steps) {
+          if (typeof st?.idx === 'number' && st.idx > maxIdx) maxIdx = st.idx;
+        }
+        if (maxIdx >= 0) {
+          childLedgerCursor[batch.convId] = Math.max(childLedgerCursor[batch.convId] ?? -1, maxIdx);
+          childClearedFloorByConv[batch.convId] = Math.max(childClearedFloorByConv[batch.convId] ?? -1, maxIdx);
+        }
+      }
+    } catch {}
+    const convs =
+      latestChildTelemetry?.conversations && typeof latestChildTelemetry.conversations === 'object'
+        ? latestChildTelemetry.conversations
+        : null;
+    if (convs) {
+      for (const [convId, conv] of Object.entries(convs)) {
+        if (!conv || conv.precision !== 'exact') continue;
+        childLedgerMeta.set(convId, {
+          maxIdx: Math.max(childLedgerCursor[convId] ?? 0, (Number(conv.stepCount) || 1) - 1),
+          sessionTotal: Number(conv.sessionTotalTokens) || 0,
+          pricedCount: Number(conv.sessionStepPricedCount) || 0
+        });
+      }
+    }
   }
 
   function dispatchSnapshot(force = false) {
     if (shutdownIfInvalidated()) return;
-    const res = window.__AGY_SCANNER__.scanWorkspace();
+    const res = window.__AGY_SCANNER__.scanWorkspace({ forceBridge: force });
     if (!res || res.ignore) {
-      window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+      window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null, pricingConfig);
       return;
     }
 
     const telemetry = res.telemetry || null;
+    const remoteHost = res.remoteHost || null;
+    const remoteHosts = Array.isArray(res.remoteHosts) ? res.remoteHosts : [];
     const capsuleEnabled = Boolean(capsuleConfig.enabled && capsuleConfig.showInPageCapsule);
-    window.__AGY_SCANNER__?.syncInPageCapsules?.(capsuleEnabled, telemetry);
+    window.__AGY_SCANNER__?.syncInPageCapsules?.(capsuleEnabled, telemetry, pricingConfig);
+    noteChildLedgerTelemetry(res.projects, telemetry);
 
     const snapshotPayload = {
       type: 'ANTIGRAVITY_WORKSPACE_SYNC',
       frameUid: FRAME_UID,
       activePane: res.activePane,
       projects: res.projects,
-      telemetry
+      telemetry,
+      remoteHost,
+      remoteHosts
     };
 
-    const hash = JSON.stringify({ a: res.activePane, p: res.projects, t: telemetry });
+    const hash = JSON.stringify({
+      a: res.activePane,
+      p: res.projects,
+      t: telemetry,
+      rh: remoteHost,
+      rhs: remoteHosts
+    });
     if (!force && hash === lastSnapshotHash) return;
     lastSnapshotHash = hash;
 
@@ -98,7 +353,9 @@
             frameUid: FRAME_UID,
             activePane: res.activePane,
             projects: res.projects,
-            telemetry
+            telemetry,
+            remoteHost,
+            remoteHosts
           },
           () => {
             void chrome.runtime.lastError;
@@ -122,6 +379,11 @@
       ) {
         setTimeout(() => dispatchSnapshot(true), 160);
       }
+    } else if (event.data?.type === 'AGY_SWITCH_REMOTE_HOST' && event.data.hostId) {
+      if (window.__AGY_SCANNER__.switchRemoteHost?.(event.data.hostId)) {
+        setTimeout(() => runWithTimestamp(true), 220);
+        setTimeout(() => runWithTimestamp(true), 650);
+      }
     } else if (event.data?.type === 'AGY_PROBE_COLLAPSED') {
       void (async () => {
         await window.__AGY_SCANNER__.probeCollapsedProjects?.(true);
@@ -129,6 +391,9 @@
       })();
     } else if (event.data?.type === 'AGY_SYNC_NOW') {
       runWithTimestamp(true);
+      if (childLedgerDirty) {
+        void flushChildLedgerDeltasNow();
+      }
     }
   });
 
@@ -148,6 +413,13 @@
           );
           if (hit) setTimeout(() => dispatchSnapshot(true), 160);
           sendResponse({ ok: hit });
+        } else if (message?.type === 'SWITCH_REMOTE_HOST_IN_FRAME' && message.hostId) {
+          const hit = Boolean(window.__AGY_SCANNER__.switchRemoteHost?.(message.hostId));
+          if (hit) {
+            setTimeout(() => runWithTimestamp(true), 220);
+            setTimeout(() => runWithTimestamp(true), 650);
+          }
+          sendResponse({ ok: hit });
         } else if (message?.type === 'PROBE_COLLAPSED_IN_FRAME') {
           void (async () => {
             await window.__AGY_SCANNER__.probeCollapsedProjects?.(true);
@@ -156,7 +428,13 @@
           sendResponse({ ok: true });
         } else if (message?.type === 'SYNC_NOW_IN_FRAME') {
           runWithTimestamp(true);
+          if (childLedgerDirty) {
+            void flushChildLedgerDeltasNow();
+          }
           sendResponse({ ok: true });
+        } else if (message?.type === 'LEDGER_HISTORY_CLEARED') {
+          handleChildLedgerCleared();
+          return false;
         }
         return false;
       });
@@ -198,7 +476,20 @@
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['class', 'style', 'aria-label', 'aria-current', 'aria-selected', 'aria-expanded', 'disabled']
+      attributeFilter: [
+        'class',
+        'style',
+        'aria-label',
+        'aria-current',
+        'aria-selected',
+        'aria-expanded',
+        'disabled',
+        'data-testid',
+        'data-selected',
+        'data-state',
+        'data-subtext',
+        'data-project-icon'
+      ]
     });
   }
 
@@ -213,8 +504,28 @@
         runWithTimestamp(true);
       });
     }
+    if (isContextAlive() && chrome.storage?.local) {
+      chrome.storage.local.get(PRICING_CONFIG_STORAGE_KEY, (res) => {
+        if (chrome.runtime.lastError) return;
+        if (window.__AGY_PRICING__?.normalizePricingConfig) {
+          pricingConfig = window.__AGY_PRICING__.normalizePricingConfig(
+            res?.[PRICING_CONFIG_STORAGE_KEY]
+          );
+          runWithTimestamp(true);
+        }
+      });
+    }
     if (isContextAlive() && chrome.storage?.onChanged) {
       chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName === 'local' && changes && PRICING_CONFIG_STORAGE_KEY in changes) {
+          if (window.__AGY_PRICING__?.normalizePricingConfig) {
+            pricingConfig = window.__AGY_PRICING__.normalizePricingConfig(
+              changes[PRICING_CONFIG_STORAGE_KEY]?.newValue
+            );
+            runWithTimestamp(true);
+          }
+          return;
+        }
         if (areaName === 'sync' && changes) {
           if ('enabled' in changes) {
             capsuleConfig.enabled = changes.enabled.newValue !== false;
@@ -229,10 +540,18 @@
   } catch {}
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) runWithTimestamp(true);
+    if (shutdownIfInvalidated()) return;
+    if (document.hidden) {
+      if (childLedgerDirty) {
+        void flushChildLedgerDeltasNow();
+      }
+    } else {
+      runWithTimestamp(true);
+    }
   });
   window.addEventListener('focus', () => runWithTimestamp(true));
   window.addEventListener('pagehide', () => {
+    flushChildLedgerDeltasNow({ syncOnly: true });
     try {
       if (isContextAlive()) {
         chrome.runtime.sendMessage(
@@ -250,6 +569,12 @@
     setTimeout(() => runWithTimestamp(true), 4500);
   }
 
-  heartbeatId = setInterval(() => runWithTimestamp(true), 900);
+  ensurePollPort();
+  heartbeatId = setInterval(() => {
+    ensurePollPort();
+    if (Date.now() - lastRunTs >= 2400) {
+      runWithTimestamp(true);
+    }
+  }, 2500);
   runWithTimestamp(true);
 })();

@@ -20,6 +20,7 @@
   const COMPLETION_DEBOUNCE_MS = 1500;
   const TITLE_SUFFIX_RE =
     /\s*·\s*(?:🔴|🔔|🟠|🟢|✅|🔵|⏳)\s*(?:待处理|未读|运行中|Waiting|Unread|Running)(?:\(\d+\))?$/;
+  const AGY_HOST_RE = /^(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
   const AGY_ORIGIN_RE = /^https:\/\/(?:[a-z0-9-]+\.)*antigravity\.google(?:\.com)?$/i;
   const LOCAL_ORIGIN_RE = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
   const ALLOWED_CHILD_SITE_DOMAINS = [
@@ -114,6 +115,7 @@
     showQuotaMetrics: true,
     showContextMetrics: true,
     showInPageCapsule: false,
+    quotaNotifications: false,
     customWaitingSelector: '',
     customRunningSelector: ''
   };
@@ -144,21 +146,50 @@
       showQuotaMetrics: src.showQuotaMetrics !== false,
       showContextMetrics: src.showContextMetrics !== false,
       showInPageCapsule: Boolean(src.showInPageCapsule),
+      quotaNotifications: Boolean(src.quotaNotifications),
       customWaitingSelector: typeof src.customWaitingSelector === 'string' ? src.customWaitingSelector : '',
       customRunningSelector: typeof src.customRunningSelector === 'string' ? src.customRunningSelector : ''
     };
   }
 
   let config = { ...DEFAULT_CONFIG };
+  let pricingConfig =
+    window.__AGY_PRICING__?.normalizePricingConfig?.(null) || {
+      version: 1,
+      currency: 'USD',
+      usdToCnyRate: 7.25,
+      overrides: {}
+    };
+
+  const LEDGER_FLUSH_DEBOUNCE_MS = 5000;
+  const LEDGER_FLUSH_MAX_WAIT_MS = 15000;
+  const PRICING_CONFIG_STORAGE_KEY =
+    window.__AGY_PRICING__?.PRICING_CONFIG_STORAGE_KEY || 'agyPricingConfigV1';
+  const frameLedgerMeta = new Map();
+  const frameLedgerCursor = Object.create(null);
+  const clearedFloorByConv = Object.create(null);
+  const convProjectHints = Object.create(null);
+  let ledgerDirty = false;
+  let ledgerDebounceStop = null;
+  let ledgerMaxWaitStop = null;
+  let ledgerFlushInFlight = false;
 
   let currentGlobalState = 'idle'; // 'idle' | 'waiting' | 'unread' | 'running'
   let globalReason = t('reasonInit', {}, 'Waiting for tasks to start');
   let previewState = null;         // null | 'waiting' | 'unread' | 'running'
   let latestProjects = [];
   let latestTelemetry = null;
+  let latestRemoteHost = null;
+  let latestRemoteHosts = [];
+  let lastRemoteHostKey = '';
   let latestCounts = { waiting: 0, unread: 0, running: 0, total: 0 };
   let lastBadgeKey = '';
   let lastPresentationKey = '';
+  let lastPushDigest = '';
+  let lastPushSentAt = 0;
+  let pushDelayTimer = null;
+  let lastQuotaReportDigest = '';
+  let lastQuotaReportAt = 0;
 
   const childFrames = new Map();
   let localHostWasConfirmed = !isLocalTopPage();
@@ -219,6 +250,14 @@
       pendingDebounceStop();
       pendingDebounceStop = null;
     }
+    if (ledgerDebounceStop) {
+      ledgerDebounceStop();
+      ledgerDebounceStop = null;
+    }
+    if (ledgerMaxWaitStop) {
+      ledgerMaxWaitStop();
+      ledgerMaxWaitStop = null;
+    }
     if (bodyObserver) {
       bodyObserver.disconnect();
       bodyObserver = null;
@@ -231,6 +270,20 @@
       clearInterval(pollIntervalId);
       pollIntervalId = null;
     }
+    if (portReconnectTimer !== null) {
+      clearTimeout(portReconnectTimer);
+      portReconnectTimer = null;
+    }
+    if (pushDelayTimer !== null) {
+      clearTimeout(pushDelayTimer);
+      pushDelayTimer = null;
+    }
+    if (timerPort) {
+      try {
+        timerPort.disconnect();
+      } catch {}
+      timerPort = null;
+    }
     return true;
   }
 
@@ -240,38 +293,73 @@
 
   let timerPort = null;
   let onPortTick = null;
+  let activeAnimIntervalMs = null;
+  let portReconnectTimer = null;
+  let portReconnectAttempt = 0;
   let nextTimeoutSeq = 1;
   const portTimeouts = new Map();
+
+  function scheduleTimerPortReconnect() {
+    if (portReconnectTimer !== null || !isContextAlive()) return;
+    const delays = [250, 800, 2000];
+    const delay = delays[Math.min(portReconnectAttempt, delays.length - 1)];
+    portReconnectAttempt++;
+    portReconnectTimer = window.setTimeout(() => {
+      portReconnectTimer = null;
+      if (isContextAlive()) {
+        ensureTimerPort();
+      }
+    }, delay);
+  }
 
   function ensureTimerPort() {
     if (timerPort) return timerPort;
     if (!isContextAlive()) return null;
     try {
       const port = chrome.runtime.connect({ name: 'agy-timer' });
+      portReconnectAttempt = 0;
       port.onMessage.addListener((msg) => {
         if (!msg) return;
         if (msg.type === 'TICK' && typeof onPortTick === 'function') {
           onPortTick();
+        } else if (msg.type === 'POLL_TICK') {
+          evaluateAllProjects();
+          syncTabTitlePresentation();
         } else if (msg.type === 'TIMEOUT_FIRE' && portTimeouts.has(msg.id)) {
-          const cb = portTimeouts.get(msg.id);
+          const entry = portTimeouts.get(msg.id);
           portTimeouts.delete(msg.id);
-          cb();
+          entry?.cb?.();
         }
       });
       port.onDisconnect.addListener(() => {
         void chrome.runtime.lastError;
         timerPort = null;
+        lastBadgeKey = '';
+        scheduleTimerPortReconnect();
       });
       timerPort = port;
+      try {
+        port.postMessage({ cmd: 'START_POLL', intervalMs: 1500 });
+        if (activeAnimIntervalMs !== null) {
+          port.postMessage({ cmd: 'START_INTERVAL', intervalMs: activeAnimIntervalMs });
+        }
+        const now = Date.now();
+        for (const [id, entry] of portTimeouts.entries()) {
+          const remaining = Math.max(50, (entry?.deadline || now) - now);
+          port.postMessage({ cmd: 'SET_TIMEOUT', id, delayMs: remaining });
+        }
+      } catch {}
       return port;
     } catch {
       timerPort = null;
+      scheduleTimerPortReconnect();
       return null;
     }
   }
 
   function stopAnimationTicker() {
     onPortTick = null;
+    activeAnimIntervalMs = null;
     if (timerPort) {
       try {
         timerPort.postMessage({ cmd: 'STOP_INTERVAL' });
@@ -294,9 +382,10 @@
       onTick();
     };
     onPortTick = wrappedTick;
+    activeAnimIntervalMs = intervalMs;
 
     const port = ensureTimerPort();
-    if (port) {
+    if (port && port === timerPort) {
       try {
         port.postMessage({ cmd: 'START_INTERVAL', intervalMs });
       } catch {}
@@ -322,6 +411,7 @@
   function startUnthrottledTimeout(callback, delayMs) {
     let fired = false;
     const seqId = nextTimeoutSeq++;
+    const deadline = Date.now() + delayMs;
 
     const fireOnce = () => {
       if (fired) return;
@@ -331,7 +421,7 @@
       callback();
     };
 
-    portTimeouts.set(seqId, fireOnce);
+    portTimeouts.set(seqId, { cb: fireOnce, deadline });
     const port = ensureTimerPort();
     if (port) {
       try {
@@ -1493,7 +1583,19 @@
     return String(rawTitle || '').replace(TITLE_SUFFIX_RE, '').trimEnd();
   }
 
+  function extractRemoteHostIdFromUrl(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl) return '';
+    try {
+      const parsed = new URL(rawUrl, window.location.origin);
+      const m = parsed.pathname.match(/^\/r\/([^/?#]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    } catch {
+      return '';
+    }
+  }
+
   function deriveWorkspaceLabel() {
+    if (latestRemoteHost?.label) return latestRemoteHost.label;
     const rawTitle = stripTitleStatusSuffix(savedBaseTitle || document.title || '').trim();
     const cleaned = rawTitle
       .replace(/\s*(?:[-–—|·•]\s*)?(?:Google\s+)?Antigravity\s*$/i, '')
@@ -1610,6 +1712,64 @@
     } catch {}
   }
 
+  function notifyExtensionPanels() {
+    if (!isContextAlive()) return;
+    if (isLocalTopPage() && !isLocalHostConfirmed()) return;
+    const projDigest = latestProjects
+      .map(
+        (p) =>
+          `${p.projectName}:${p.projectType}:${(p.tasks || [])
+            .map((task) => `${task.taskId}=${task.state}:${task.isActive ? 1 : 0}`)
+            .join(',')}`
+      )
+      .join('|');
+    const activeConv =
+      latestTelemetry?.activeConvId && latestTelemetry?.conversations
+        ? latestTelemetry.conversations[latestTelemetry.activeConvId] || null
+        : null;
+    const nextDigest = JSON.stringify([
+      getEffectiveGlobalState(),
+      latestCounts.waiting,
+      latestCounts.unread,
+      latestCounts.running,
+      latestCounts.total,
+      latestRemoteHost?.id || '',
+      latestRemoteHost?.label || '',
+      latestRemoteHosts.length,
+      projDigest,
+      latestTelemetry?.quotaPools?.gemini?.remainingFraction ?? '',
+      latestTelemetry?.quotaPools?.gemini?.etaMs ?? '',
+      latestTelemetry?.quotaPools?.premium?.remainingFraction ?? '',
+      latestTelemetry?.quotaPools?.premium?.etaMs ?? '',
+      activeConv?.contextUsed ?? '',
+      activeConv?.sessionTotalTokens ?? ''
+    ]);
+    if (nextDigest === lastPushDigest) return;
+
+    const sendNow = () => {
+      pushDelayTimer = null;
+      if (!isContextAlive()) return;
+      lastPushDigest = nextDigest;
+      lastPushSentAt = Date.now();
+      try {
+        chrome.runtime.sendMessage({ type: 'AGY_STATE_PUSH' }, () => {
+          void chrome.runtime.lastError;
+        });
+      } catch {}
+    };
+
+    const elapsed = Date.now() - lastPushSentAt;
+    if (elapsed >= 120) {
+      if (pushDelayTimer !== null) {
+        clearTimeout(pushDelayTimer);
+        pushDelayTimer = null;
+      }
+      sendNow();
+    } else if (pushDelayTimer === null) {
+      pushDelayTimer = window.setTimeout(sendNow, Math.max(20, 120 - elapsed));
+    }
+  }
+
   // ============================================================================
   // 4. 多项目状态树合并、单任务防抖与未读追踪引擎
   // ============================================================================
@@ -1633,12 +1793,53 @@
 
     const quotaPools = { gemini: null, premium: null };
     for (const poolKey of ['gemini', 'premium']) {
+      let primary = null;
       for (const src of byNewest) {
         const poolVal = src.telemetry.quotaPools?.[poolKey];
-        if (poolVal && typeof poolVal === 'object') {
-          quotaPools[poolKey] = poolVal;
+        if (!poolVal || typeof poolVal !== 'object') continue;
+        if (
+          typeof poolVal.remainingFraction === 'number' &&
+          Number.isFinite(poolVal.remainingFraction)
+        ) {
+          primary = poolVal;
           break;
         }
+        if (!primary) primary = poolVal;
+      }
+      if (primary) {
+        let mergedPool = primary;
+        const primaryObs =
+          typeof mergedPool.observedAt === 'number' && Number.isFinite(mergedPool.observedAt)
+            ? mergedPool.observedAt
+            : maxFetchedAt;
+        if (mergedPool.observedAt !== primaryObs) {
+          mergedPool = { ...mergedPool, observedAt: primaryObs };
+        }
+        if (mergedPool.etaMs == null || mergedPool.burnRatePerHour == null) {
+          for (const src of byNewest) {
+            if (maxFetchedAt - src.fetchedAt > 15_000) continue;
+            const sib = src.telemetry.quotaPools?.[poolKey];
+            if (!sib || typeof sib !== 'object' || sib === primary) continue;
+            if ((mergedPool.resetTimeMs ?? null) !== (sib.resetTimeMs ?? null)) {
+              continue;
+            }
+            const nextEta =
+              mergedPool.etaMs != null ? mergedPool.etaMs : sib.etaMs ?? null;
+            const nextBurn =
+              mergedPool.burnRatePerHour != null
+                ? mergedPool.burnRatePerHour
+                : sib.burnRatePerHour ?? null;
+            if (nextEta !== mergedPool.etaMs || nextBurn !== mergedPool.burnRatePerHour) {
+              mergedPool = {
+                ...mergedPool,
+                etaMs: nextEta,
+                burnRatePerHour: nextBurn
+              };
+            }
+            if (mergedPool.etaMs != null && mergedPool.burnRatePerHour != null) break;
+          }
+        }
+        quotaPools[poolKey] = mergedPool;
       }
     }
     for (const src of byNewest) {
@@ -1691,13 +1892,17 @@
       for (const [convId, conv] of Object.entries(convMap)) {
         if (!conv || typeof conv !== 'object') continue;
         const precisionScore = conv.precision === 'exact' ? 2 : 1;
+        const pricedSteps = Number(conv.sessionStepPricedCount) || 0;
         const prev = convRank.get(convId);
         if (
           !prev ||
           precisionScore > prev.precisionScore ||
-          (precisionScore === prev.precisionScore && src.fetchedAt >= prev.fetchedAt)
+          (precisionScore === prev.precisionScore && pricedSteps > prev.pricedSteps) ||
+          (precisionScore === prev.precisionScore &&
+            pricedSteps === prev.pricedSteps &&
+            src.fetchedAt >= prev.fetchedAt)
         ) {
-          convRank.set(convId, { precisionScore, fetchedAt: src.fetchedAt });
+          convRank.set(convId, { precisionScore, pricedSteps, fetchedAt: src.fetchedAt });
           conversations[convId] = conv;
         }
       }
@@ -1728,6 +1933,9 @@
     let bestActivePane = topScan.activePane || { state: 'none', reason: '' };
     const projectMap = new Map();
     let activeChildCount = 0;
+    let mergedRemoteHost = topScan.remoteHost || null;
+    let mergedRemoteHostTs = mergedRemoteHost ? now : -1;
+    let mergedRemoteHosts = Array.isArray(topScan.remoteHosts) ? [...topScan.remoteHosts] : [];
 
     const ingestProjects = (projList, sourceFrame) => {
       if (!Array.isArray(projList)) return;
@@ -1786,6 +1994,15 @@
       if (entry.telemetry) {
         telemetrySources.push({ telemetry: entry.telemetry, isTop: false });
       }
+      if (entry.remoteHost && entry.remoteHost.label && entry.ts >= mergedRemoteHostTs) {
+        mergedRemoteHost = entry.remoteHost;
+        mergedRemoteHostTs = entry.ts;
+      }
+      if (Array.isArray(entry.remoteHosts) && entry.remoteHosts.length > 0) {
+        if (mergedRemoteHosts.length === 0 || entry.remoteHosts.length >= mergedRemoteHosts.length) {
+          mergedRemoteHosts = entry.remoteHosts;
+        }
+      }
       if (
         entry.activePane &&
         (STATE_RANK[entry.activePane.state] || 0) > (STATE_RANK[bestActivePane.state] || 0)
@@ -1794,6 +2011,34 @@
       }
       ingestProjects(entry.projects, frameKey);
     }
+
+    const urlHostId = extractRemoteHostIdFromUrl(location.href);
+    if (urlHostId) {
+      if (mergedRemoteHost && !mergedRemoteHost.id) {
+        mergedRemoteHost = { ...mergedRemoteHost, id: urlHostId };
+      } else if (!mergedRemoteHost && mergedRemoteHosts.length > 0) {
+        const matched = mergedRemoteHosts.find((h) => h && h.id === urlHostId);
+        if (matched) mergedRemoteHost = matched;
+      }
+    }
+
+    const nextHostKey = mergedRemoteHost?.id || urlHostId || '';
+    if (lastRemoteHostKey && nextHostKey && nextHostKey !== lastRemoteHostKey) {
+      topCollapsedCache.clear();
+      taskTracker.clear();
+      stickyWaitingByTitle.clear();
+      lastBadgeKey = '';
+      for (const [fk, fEntry] of childFrames.entries()) {
+        if (fEntry.remoteHost?.id && fEntry.remoteHost.id !== nextHostKey) {
+          childFrames.delete(fk);
+        }
+      }
+    }
+    if (nextHostKey) {
+      lastRemoteHostKey = nextHostKey;
+    }
+    latestRemoteHost = mergedRemoteHost;
+    latestRemoteHosts = mergedRemoteHosts;
 
     const mergedTelemetry = mergeTelemetry(telemetrySources);
 
@@ -1881,10 +2126,45 @@
     return { mergedProjects, activeChildCount, mergedTelemetry };
   }
 
+  function maybeReportQuotaSnapshot(nowMs = Date.now()) {
+    if (!isContextAlive() || !config.enabled || !config.quotaNotifications) return;
+    const pools = latestTelemetry?.quotaPools;
+    if (!pools || (!pools.gemini && !pools.premium)) return;
+    const g = pools.gemini || null;
+    const p = pools.premium || null;
+    const digest = JSON.stringify([
+      g && typeof g.remainingFraction === 'number' ? Math.round(g.remainingFraction * 100) : -1,
+      g?.resetTimeMs ?? 0,
+      g?.unusedPreResetHint ? 1 : 0,
+      p && typeof p.remainingFraction === 'number' ? Math.round(p.remainingFraction * 100) : -1,
+      p?.resetTimeMs ?? 0,
+      p?.unusedPreResetHint ? 1 : 0
+    ]);
+    if (digest === lastQuotaReportDigest && nowMs - lastQuotaReportAt < 30_000) {
+      return;
+    }
+    lastQuotaReportDigest = digest;
+    lastQuotaReportAt = nowMs;
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: 'REPORT_QUOTA_SNAPSHOT',
+          workspaceLabel: deriveWorkspaceLabel(),
+          isTabHidden: Boolean(document.hidden),
+          fetchedAt: latestTelemetry.fetchedAt,
+          quotaPools: pools
+        },
+        () => {
+          void chrome.runtime.lastError;
+        }
+      );
+    } catch {}
+  }
+
   function evaluateAllProjects() {
     if (shutdownIfInvalidated()) return;
     if (isLocalTopPage() && !isLocalHostConfirmed()) {
-      window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+      window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null, pricingConfig);
       return;
     }
     if (isLocalTopPage() && !localHostWasConfirmed) {
@@ -1896,10 +2176,13 @@
     const now = Date.now();
     const { mergedProjects, activeChildCount, mergedTelemetry } = mergeFrameWorkspaces();
     latestTelemetry = mergedTelemetry;
+    maybeReportQuotaSnapshot(now);
     window.__AGY_SCANNER__?.syncInPageCapsules?.(
       Boolean(config.enabled && config.showInPageCapsule),
-      latestTelemetry
+      latestTelemetry,
+      pricingConfig
     );
+    noteLedgerTelemetry(mergedProjects, mergedTelemetry);
 
     let needsDebounceRecheck = false;
     let waitingCount = 0;
@@ -1954,7 +2237,11 @@
           // 很可能是提问前的旧详情快照（runStatus 仍为 RUNNING、无 waiting 字段），不能据此
           // 清除已确认的 waiting。唯一能证明 waiting 结束的证据是：点开该对话后面板显示
           // 非 waiting（isActive 分支），或变 unread/idle（下方 debounce 分支）。
-          if ((task.isActive && task.state !== 'waiting') || task.state === 'unread') {
+          if (
+            (task.isActive && task.state !== 'waiting') ||
+            task.state === 'unread' ||
+            (task.state === 'running' && task.confirmedRunning)
+          ) {
             clearStickyWaiting();
           } else if (!task.isActive && task.state === 'running') {
             const stickyRsn =
@@ -2000,7 +2287,10 @@
             clearStickyWaiting();
 
             if (task.state === 'unread') {
-              if (rec.dismissedUnread || (task.isActive && !document.hidden && !rec.runtimeUnread)) {
+              if (
+                rec.dismissedUnread ||
+                (task.isActive && !document.hidden && !rec.runtimeUnread && !task.explicitUnread)
+              ) {
                 effectiveTaskState = 'idle';
               } else {
                 effectiveTaskState = 'unread';
@@ -2120,13 +2410,22 @@
     }
 
     globalReason = nextReason;
+    const prevGlobalState = currentGlobalState;
     const presentationKey = `${nextState}:${waitingCount}:${unreadCount}:${runningCount}`;
-    if (currentGlobalState !== nextState || presentationKey !== lastPresentationKey) {
-      currentGlobalState = nextState;
+    currentGlobalState = nextState;
+    const effectiveState = getEffectiveGlobalState();
+    const faviconMissing = Boolean(
+      config.enabled && effectiveState !== 'idle' && !document.getElementById(FAVICON_ID)
+    );
+    if (prevGlobalState !== nextState || faviconMissing) {
+      syncFaviconPresentation();
+    }
+    if (prevGlobalState !== nextState || presentationKey !== lastPresentationKey) {
       lastPresentationKey = presentationKey;
-      syncTabPresentation();
+      syncTabTitlePresentation();
     }
     syncToolbarActionBadge(waitingCount, unreadCount);
+    notifyExtensionPanels();
   }
 
   function markAllTasksAsRead() {
@@ -2157,11 +2456,20 @@
     syncTabPresentation();
   }
 
-  function recordChildSync(frameKey, activePane, projects, telemetry = null) {
+  function recordChildSync(
+    frameKey,
+    activePane,
+    projects,
+    telemetry = null,
+    remoteHost = null,
+    remoteHosts = []
+  ) {
     childFrames.set(frameKey || 'default-child', {
       activePane: activePane || { state: 'none', reason: '' },
       projects: Array.isArray(projects) ? projects : [],
       telemetry: telemetry && typeof telemetry === 'object' ? telemetry : null,
+      remoteHost: remoteHost && typeof remoteHost === 'object' ? remoteHost : null,
+      remoteHosts: Array.isArray(remoteHosts) ? remoteHosts : [],
       ts: Date.now()
     });
     evaluateAllProjects();
@@ -2191,7 +2499,9 @@
         data.frameUid || 'postmsg-child',
         data.activePane,
         data.projects,
-        data.telemetry || null
+        data.telemetry || null,
+        data.remoteHost || null,
+        Array.isArray(data.remoteHosts) ? data.remoteHosts : []
       );
     }
   });
@@ -2211,6 +2521,185 @@
   // 5. 与 Popup 交互通信及初始化
   // ============================================================================
 
+  function clearLedgerFlushTimers() {
+    if (ledgerDebounceStop) {
+      ledgerDebounceStop();
+      ledgerDebounceStop = null;
+    }
+    if (ledgerMaxWaitStop) {
+      ledgerMaxWaitStop();
+      ledgerMaxWaitStop = null;
+    }
+  }
+
+  function scheduleLedgerFlush() {
+    if (shutdownIfInvalidated()) return;
+    if (ledgerDebounceStop) {
+      ledgerDebounceStop();
+      ledgerDebounceStop = null;
+    }
+    ledgerDebounceStop = startUnthrottledTimeout(() => {
+      ledgerDebounceStop = null;
+      void flushLedgerDeltasNow();
+    }, LEDGER_FLUSH_DEBOUNCE_MS);
+    if (!ledgerMaxWaitStop) {
+      ledgerMaxWaitStop = startUnthrottledTimeout(() => {
+        ledgerMaxWaitStop = null;
+        void flushLedgerDeltasNow();
+      }, LEDGER_FLUSH_MAX_WAIT_MS);
+    }
+  }
+
+  function noteLedgerTelemetry(mergedProjects, mergedTelemetry) {
+    if (Array.isArray(mergedProjects)) {
+      for (const proj of mergedProjects) {
+        const pName = String(proj?.projectName || '').trim();
+        if (!pName || !Array.isArray(proj?.tasks)) continue;
+        for (const task of proj.tasks) {
+          if (task?.convId) {
+            convProjectHints[String(task.convId)] = pName;
+          }
+        }
+      }
+    }
+    const convs =
+      mergedTelemetry?.conversations && typeof mergedTelemetry.conversations === 'object'
+        ? mergedTelemetry.conversations
+        : null;
+    if (!convs) return;
+
+    let changed = false;
+    for (const [convId, conv] of Object.entries(convs)) {
+      if (
+        !convId ||
+        convId.length < 6 ||
+        convId.length > 160 ||
+        convId.startsWith('composer-panel-')
+      ) {
+        continue;
+      }
+      if (conv?.precision !== 'exact') continue;
+      const pricedCount = Number(conv.sessionStepPricedCount) || 0;
+      const sessionTotal = Number(conv.sessionTotalTokens) || 0;
+      if (pricedCount <= 0 || sessionTotal <= 0) continue;
+
+      const prev = frameLedgerMeta.get(convId);
+      const stepHint = Math.max(0, (Number(conv.stepCount) || 1) - 1);
+      if (!prev || prev.pricedCount !== pricedCount || prev.sessionTotal !== sessionTotal) {
+        frameLedgerMeta.set(convId, {
+          maxIdx: Math.max(prev?.maxIdx ?? 0, stepHint),
+          sessionTotal,
+          pricedCount
+        });
+        changed = true;
+      }
+    }
+    if (changed) {
+      ledgerDirty = true;
+      scheduleLedgerFlush();
+    }
+  }
+
+  function flushLedgerDeltasNow({ syncOnly = false } = {}) {
+    if (shutdownIfInvalidated()) return;
+    if (isLocalTopPage() && !isLocalHostConfirmed()) return;
+    clearLedgerFlushTimers();
+    if (ledgerFlushInFlight && !syncOnly) return;
+
+    const rawBatches =
+      window.__AGY_SCANNER__?.harvestLedgerDeltas?.(frameLedgerCursor, latestProjects) || [];
+    ledgerDirty = false;
+    if (!Array.isArray(rawBatches) || rawBatches.length === 0) return;
+
+    const batches = [];
+    const batchMaxByConv = Object.create(null);
+    for (const batch of rawBatches) {
+      if (!batch?.convId || !Array.isArray(batch.steps)) continue;
+      const floor = typeof clearedFloorByConv[batch.convId] === 'number' ? clearedFloorByConv[batch.convId] : -1;
+      const filteredSteps = floor >= 0 ? batch.steps.filter((st) => typeof st?.idx === 'number' && st.idx > floor) : batch.steps;
+      if (filteredSteps.length === 0) continue;
+      const nextBatch = {
+        ...batch,
+        steps: filteredSteps
+      };
+      if (!nextBatch.projectName && convProjectHints[nextBatch.convId]) {
+        nextBatch.projectName = convProjectHints[nextBatch.convId];
+      }
+      let maxIdx = -1;
+      for (const st of filteredSteps) {
+        if (typeof st?.idx === 'number' && st.idx > maxIdx) maxIdx = st.idx;
+      }
+      if (maxIdx >= 0) {
+        batchMaxByConv[nextBatch.convId] = maxIdx;
+      }
+      batches.push(nextBatch);
+    }
+    if (batches.length === 0) return;
+
+    const payload = {
+      type: 'INGEST_USAGE_DELTAS',
+      batches,
+      projectHints: { ...convProjectHints }
+    };
+
+    try {
+      if (syncOnly) {
+        chrome.runtime.sendMessage(payload, () => {
+          void chrome.runtime.lastError;
+        });
+        return;
+      }
+      ledgerFlushInFlight = true;
+      chrome.runtime.sendMessage(payload, (resp) => {
+        ledgerFlushInFlight = false;
+        if (!chrome.runtime.lastError && resp?.ok === true) {
+          for (const [cid, maxIdx] of Object.entries(batchMaxByConv)) {
+            frameLedgerCursor[cid] = Math.max(frameLedgerCursor[cid] ?? -1, maxIdx);
+          }
+        } else {
+          ledgerDirty = true;
+        }
+      });
+    } catch {
+      ledgerFlushInFlight = false;
+      ledgerDirty = true;
+    }
+  }
+
+  function handleLedgerHistoryCleared() {
+    clearLedgerFlushTimers();
+    ledgerDirty = false;
+    try {
+      const allBatches =
+        window.__AGY_SCANNER__?.harvestLedgerDeltas?.({}, latestProjects) || [];
+      for (const batch of allBatches) {
+        if (!batch?.convId || !Array.isArray(batch.steps)) continue;
+        let maxIdx = -1;
+        for (const st of batch.steps) {
+          if (typeof st?.idx === 'number' && st.idx > maxIdx) maxIdx = st.idx;
+        }
+        if (maxIdx >= 0) {
+          frameLedgerCursor[batch.convId] = Math.max(frameLedgerCursor[batch.convId] ?? -1, maxIdx);
+          clearedFloorByConv[batch.convId] = Math.max(clearedFloorByConv[batch.convId] ?? -1, maxIdx);
+        }
+      }
+    } catch {}
+    const convs =
+      latestTelemetry?.conversations && typeof latestTelemetry.conversations === 'object'
+        ? latestTelemetry.conversations
+        : null;
+    if (convs) {
+      for (const [convId, conv] of Object.entries(convs)) {
+        if (!conv || conv.precision !== 'exact') continue;
+        frameLedgerMeta.set(convId, {
+          maxIdx: Math.max(frameLedgerCursor[convId] ?? 0, (Number(conv.stepCount) || 1) - 1),
+          sessionTotal: Number(conv.sessionTotalTokens) || 0,
+          pricedCount: Number(conv.sessionStepPricedCount) || 0
+        });
+      }
+    }
+  }
+
   if (isContextAlive()) {
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!isContextAlive() || !message || typeof message !== 'object') return false;
@@ -2220,7 +2709,9 @@
           message.frameKey,
           message.activePane,
           message.projects,
-          message.telemetry || null
+          message.telemetry || null,
+          message.remoteHost || null,
+          Array.isArray(message.remoteHosts) ? message.remoteHosts : []
         );
         return false;
       }
@@ -2261,12 +2752,20 @@
           }
         }
         evaluateAllProjects();
+        if (ledgerDirty) {
+          void flushLedgerDeltasNow();
+        }
         sendResponse({ ok: true });
         return false;
       }
 
       if (message.type === 'GET_STATUS') {
-        if (childFrames.size === 0 && document.querySelector('iframe')) {
+        const hasIframe = Boolean(document.querySelector('iframe'));
+        let newestChildTs = 0;
+        for (const entry of childFrames.values()) {
+          if (entry.ts > newestChildTs) newestChildTs = entry.ts;
+        }
+        if (hasIframe && (childFrames.size === 0 || Date.now() - newestChildTs > 1200 || ledgerDirty)) {
           try {
             chrome.runtime.sendMessage({ type: 'PING_CHILD_FRAMES' }, () => {
               void chrome.runtime.lastError;
@@ -2277,6 +2776,9 @@
           }
         }
         evaluateAllProjects();
+        if (ledgerDirty) {
+          void flushLedgerDeltasNow();
+        }
         sendResponse({
           ok: true,
           enabled: config.enabled,
@@ -2289,6 +2791,8 @@
           pageTitle: stripTitleStatusSuffix(savedBaseTitle || document.title || ''),
           workspaceLabel: deriveWorkspaceLabel(),
           pageUrl: location.href,
+          remoteHost: latestRemoteHost,
+          remoteHosts: latestRemoteHosts,
           state: getEffectiveGlobalState(),
           detectedState: currentGlobalState,
           counts: latestCounts,
@@ -2304,6 +2808,44 @@
             : globalReason,
           previewState
         });
+        return false;
+      }
+
+      if (message.type === 'SWITCH_REMOTE_HOST' && typeof message.hostId === 'string') {
+        const hostId = message.hostId.trim();
+        if (!hostId) {
+          sendResponse({ ok: false });
+          return false;
+        }
+        let hitTop = false;
+        if (window.__AGY_SCANNER__?.switchRemoteHost) {
+          hitTop = Boolean(window.__AGY_SCANNER__.switchRemoteHost(hostId));
+        }
+        if (!hitTop) {
+          for (const frameEl of document.querySelectorAll('iframe')) {
+            postToAntigravityIframe(frameEl, {
+              type: 'AGY_SWITCH_REMOTE_HOST',
+              hostId
+            });
+          }
+        }
+        if (
+          !hostId.startsWith('__') &&
+          /^[a-zA-Z0-9._-]{3,128}$/.test(hostId) &&
+          AGY_HOST_RE.test(location.hostname)
+        ) {
+          window.setTimeout(() => {
+            if (isContextAlive() && extractRemoteHostIdFromUrl(location.href) !== hostId) {
+              try {
+                window.location.href = new URL(
+                  `/r/${encodeURIComponent(hostId)}`,
+                  window.location.origin
+                ).href;
+              } catch {}
+            }
+          }, 550);
+        }
+        sendResponse({ ok: true });
         return false;
       }
 
@@ -2344,6 +2886,9 @@
           }
         }
         evaluateAllProjects();
+        if (ledgerDirty) {
+          void flushLedgerDeltasNow();
+        }
         sendResponse({ ok: true });
         return false;
       }
@@ -2357,11 +2902,16 @@
 
       if (message.type === 'INSPECT_PAGE') {
         evaluateAllProjects();
+        if (ledgerDirty) {
+          void flushLedgerDeltasNow();
+        }
         sendResponse({
           ok: true,
           snapshot: {
             url: location.href,
             title: document.title,
+            remoteHost: latestRemoteHost,
+            remoteHosts: latestRemoteHosts,
             indicatorStyle: config.indicatorStyle,
             iconLayout: config.iconLayout,
             badgeSize: config.badgeSize,
@@ -2380,14 +2930,33 @@
         return false;
       }
 
+      if (message.type === 'LEDGER_HISTORY_CLEARED') {
+        handleLedgerHistoryCleared();
+        return false;
+      }
+
       return false;
+    });
+
+    chrome.storage.local.get(PRICING_CONFIG_STORAGE_KEY, (res) => {
+      if (chrome.runtime.lastError) return;
+      if (window.__AGY_PRICING__?.normalizePricingConfig) {
+        pricingConfig = window.__AGY_PRICING__.normalizePricingConfig(
+          res?.[PRICING_CONFIG_STORAGE_KEY]
+        );
+        window.__AGY_SCANNER__?.syncInPageCapsules?.(
+          Boolean(config.enabled && config.showInPageCapsule),
+          latestTelemetry,
+          pricingConfig
+        );
+      }
     });
 
     chrome.storage.sync.get(DEFAULT_CONFIG, (items) => {
       const hasStorageError = Boolean(chrome.runtime.lastError);
       config = normalizeConfig(hasStorageError ? DEFAULT_CONFIG : items);
       if (isLocalTopPage() && !isLocalHostConfirmed()) {
-        window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+        window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null, pricingConfig);
         return;
       }
       rebuildAllFrames();
@@ -2396,7 +2965,21 @@
     });
 
     chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (!isContextAlive() || areaName !== 'sync') return;
+      if (!isContextAlive() || !changes) return;
+      if (areaName === 'local' && PRICING_CONFIG_STORAGE_KEY in changes) {
+        if (window.__AGY_PRICING__?.normalizePricingConfig) {
+          pricingConfig = window.__AGY_PRICING__.normalizePricingConfig(
+            changes[PRICING_CONFIG_STORAGE_KEY]?.newValue
+          );
+          window.__AGY_SCANNER__?.syncInPageCapsules?.(
+            Boolean(config.enabled && config.showInPageCapsule),
+            latestTelemetry,
+            pricingConfig
+          );
+        }
+        return;
+      }
+      if (areaName !== 'sync') return;
       let needRebuild = false;
       let changedConfig = false;
       const nextRaw = { ...config };
@@ -2407,12 +2990,16 @@
           if (key === 'indicatorStyle' || key === 'iconLayout' || key === 'badgeSize') {
             needRebuild = true;
           }
+          if (key === 'quotaNotifications' && newValue) {
+            lastQuotaReportDigest = '';
+            lastQuotaReportAt = 0;
+          }
         }
       }
       if (!changedConfig) return;
       config = normalizeConfig(nextRaw);
       if (isLocalTopPage() && !isLocalHostConfirmed()) {
-        window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null);
+        window.__AGY_SCANNER__?.syncInPageCapsules?.(false, null, pricingConfig);
         return;
       }
       if (needRebuild) rebuildAllFrames();
@@ -2453,7 +3040,17 @@
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['class', 'style', 'aria-label', 'aria-current', 'aria-selected', 'aria-expanded']
+      attributeFilter: [
+        'class',
+        'style',
+        'aria-label',
+        'aria-current',
+        'aria-selected',
+        'aria-expanded',
+        'data-testid',
+        'data-selected',
+        'data-state'
+      ]
     });
   }
 
@@ -2468,7 +3065,16 @@
       return;
     }
     let titleTouched = false;
+    let iconOverwritten = false;
     for (const m of mutations) {
+      if (
+        m.type === 'attributes' &&
+        m.target instanceof HTMLLinkElement &&
+        m.target.id !== FAVICON_ID &&
+        (m.target.getAttribute('rel') || '').toLowerCase().includes('icon')
+      ) {
+        iconOverwritten = true;
+      }
       if (
         m.target?.nodeName === 'TITLE' ||
         m.target?.parentNode?.nodeName === 'TITLE'
@@ -2480,25 +3086,47 @@
           titleTouched = true;
         } else if (node instanceof HTMLLinkElement && node.id !== FAVICON_ID) {
           if ((node.getAttribute('rel') || '').toLowerCase().includes('icon')) {
-            if (config.enabled && getEffectiveGlobalState() !== 'idle') {
-              syncFaviconPresentation();
-            }
+            iconOverwritten = true;
           }
         }
       }
+    }
+    if (iconOverwritten && config.enabled && getEffectiveGlobalState() !== 'idle') {
+      syncFaviconPresentation();
     }
     if (titleTouched) {
       syncTabTitlePresentation();
     }
   });
-  headObserver.observe(head, { childList: true, subtree: true, characterData: true });
+  headObserver.observe(head, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['href', 'rel']
+  });
 
+  document.addEventListener('visibilitychange', () => {
+    if (shutdownIfInvalidated()) return;
+    if (document.hidden) {
+      if (ledgerDirty) {
+        void flushLedgerDeltasNow();
+      }
+    } else {
+      lastBadgeKey = '';
+      evaluateAllProjects();
+    }
+  });
+
+  ensureTimerPort();
   pollIntervalId = window.setInterval(() => {
+    ensureTimerPort();
     evaluateAllProjects();
     syncTabTitlePresentation();
-  }, 900);
+  }, 1500);
   window.addEventListener('pagehide', () => {
     if (!isContextAlive()) return;
+    flushLedgerDeltasNow({ syncOnly: true });
     try {
       chrome.runtime.sendMessage({ type: 'TOP_FRAME_UNLOAD' }, () => {
         void chrome.runtime.lastError;

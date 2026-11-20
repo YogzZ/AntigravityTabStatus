@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    name: Verify, Package & Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify tag matches manifest version
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          MANIFEST_VER="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("manifest.json","utf8")).version)')"
+          if [ "$TAG_VER" != "$MANIFEST_VER" ]; then
+            echo "Error: tag version ($TAG_VER) !== manifest.json version ($MANIFEST_VER)" >&2
+            exit 1
+          fi
+
+      - name: Run extension verification suite
+        run: node scripts/verify.mjs
+
+      - name: Build clean runtime package
+        run: bash scripts/package.sh
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          node -e '
+          const fs = require("fs");
+          const tag = process.env.GITHUB_REF_NAME || "";
+          const ver = tag.replace(/^v/, "");
+          const lines = fs.readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/);
+          const headerPrefix = `## [${ver}]`;
+          const startIdx = lines.findIndex((line) => line.startsWith(headerPrefix));
+          const body = [];
+          if (startIdx >= 0) {
+            for (let i = startIdx + 1; i < lines.length; i++) {
+              const line = lines[i];
+              if (/^---\s*$/.test(line) || /^## \[/.test(line)) break;
+              body.push(line);
+            }
+          }
+          const notes = body.join("\n").trim() || `Release v${ver}`;
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/release-notes.md`, `${notes}\n`, "utf8");
+          '
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSET="dist/antigravity-tab-status-v${GITHUB_REF_NAME#v}.zip"
+          if [ ! -f "$ASSET" ]; then
+            echo "Error: missing release asset $ASSET" >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Antigravity Tab Status ${GITHUB_REF_NAME}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$GITHUB_REF_NAME" "$ASSET" \
+              --verify-tag \
+              --title "Antigravity Tab Status ${GITHUB_REF_NAME}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi

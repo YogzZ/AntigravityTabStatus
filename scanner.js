@@ -300,6 +300,7 @@
 
   function isCompactWarmBadgeElement(el, rowEl, excludedIconEl = null) {
     if (!el || !(el instanceof Element) || el === rowEl || !isElementRendered(el, 1)) return false;
+    if (isInsideExplicitUnreadIndicator(el, rowEl)) return false;
     if (excludedIconEl && (el === excludedIconEl || excludedIconEl.contains(el) || el.contains(excludedIconEl))) {
       return false;
     }
@@ -391,6 +392,39 @@
     );
   }
 
+  function isInsideHiddenRowActions(el, rowEl = null) {
+    if (!el || !(el instanceof Element)) return false;
+    const actionsWrap = el.closest?.('.agy-row-actions');
+    if (!actionsWrap) return false;
+    if (rowEl && !rowEl.contains(actionsWrap)) return false;
+    const st = window.getComputedStyle(actionsWrap);
+    return (
+      st.display === 'none' ||
+      st.visibility === 'hidden' ||
+      parseFloat(st.opacity || '1') < 0.12
+    );
+  }
+
+  function isInsideExplicitUnreadIndicator(el, rowEl = null) {
+    if (!el || !(el instanceof Element)) return false;
+    const unreadWrap = el.closest?.('[data-testid="status-unread-dot"], [data-testid*="unread" i]');
+    if (!unreadWrap) return false;
+    if (rowEl && !rowEl.contains(unreadWrap)) return false;
+    return true;
+  }
+
+  function isAnimationTargetRendered(el) {
+    if (!el || !(el instanceof Element)) return false;
+    if (el.hasAttribute('hidden') || isInsideHiddenRowActions(el, null)) return false;
+    const ownerSvg = el.tagName.toLowerCase() !== 'svg' ? el.closest?.('svg') : null;
+    if (ownerSvg) {
+      if (!isElementRendered(ownerSvg, 4)) return false;
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    }
+    return isElementRendered(el, 2);
+  }
+
   function isIconFontElement(el) {
     if (!el || !(el instanceof Element)) return false;
     const cls = (el.getAttribute('class') || '').toLowerCase();
@@ -433,7 +467,7 @@
         for (const anim of anims) {
           if (anim.playState !== 'running') continue;
           const target = anim.effect?.target;
-          if (target instanceof Element && !isElementRendered(target, 2)) continue;
+          if (target instanceof Element && !isAnimationTargetRendered(target)) continue;
           const timing = anim.effect?.getComputedTiming ? anim.effect.getComputedTiming() : null;
           const name = (anim.animationName || '').toLowerCase();
           if (isAttentionPulseOnly(name, target)) continue;
@@ -453,7 +487,7 @@
 
     const candidates = [rootEl, ...Array.from(rootEl.querySelectorAll?.('svg, g, circle, rect, path, span, div') || [])];
     for (const el of candidates) {
-      if (!isElementRendered(el, 2)) continue;
+      if (!isAnimationTargetRendered(el)) continue;
       const st = window.getComputedStyle(el);
       if (
         st.animationName &&
@@ -631,11 +665,21 @@
 
     for (const item of btnItems) {
       if (item.disabled || item.btn.closest('nav')) continue;
-      if (
-        (item.btn.getAttribute('data-testid') === 'idle-status-text' ||
-          /\b\d+\s+tasks?\s+running\b/i.test(item.txt)) &&
-        /\b\d+\s+tasks?\s+running\b/i.test(item.txt)
-      ) {
+      const isIdleStatusBtn = item.btn.getAttribute('data-testid') === 'idle-status-text';
+      const matchesTasksRunning = /\b\d+\s+tasks?\s+running\b/i.test(item.txt);
+      if (!isIdleStatusBtn && !matchesTasksRunning) continue;
+      const matchesBgRunningText =
+        matchesTasksRunning ||
+        /\b(?:waiting\s+for\s+(?:\d+\s*[smhd]\w*\s+)?timer|background\s+tasks?\s+running)\b/i.test(
+          item.txt
+        );
+      const shimmerEl = isIdleStatusBtn ? item.btn.querySelector('.animate-shimmer-text') : null;
+      const hasActiveShimmer =
+        Boolean(shimmerEl && isElementVisible(shimmerEl)) &&
+        !/^waiting for (?:user |your )?(?:input|approval|confirmation|response|feedback|review)\b/i.test(
+          item.txt
+        );
+      if (matchesBgRunningText || hasActiveShimmer) {
         return {
           state: 'running',
           reason: t('reasonMainAgentWorking', {}, 'Agent working in main pane')
@@ -852,13 +896,16 @@
    * 区分项目行左侧图标是远程项目（☁ Cloud -> 'remote'）还是本地项目（📁 Folder -> 'local'）
    */
   function classifyProjectSvgType(svg) {
+    const iconOwner = svg.closest?.('[data-project-icon]');
     const meta = `${svg.getAttribute('aria-label') || ''} ${svg.getAttribute('title') || ''} ${
       svg.getAttribute('class') || ''
     } ${svg.getAttribute('data-icon') || ''} ${svg.getAttribute('data-testid') || ''} ${
-      svg.parentElement?.getAttribute('aria-label') || ''
-    } ${svg.parentElement?.getAttribute('title') || ''} ${
-      svg.parentElement?.getAttribute('class') || ''
-    }`.toLowerCase();
+      svg.getAttribute('data-project-icon') || ''
+    } ${svg.parentElement?.getAttribute('aria-label') || ''} ${
+      svg.parentElement?.getAttribute('title') || ''
+    } ${svg.parentElement?.getAttribute('class') || ''} ${
+      svg.parentElement?.getAttribute('data-project-icon') || ''
+    } ${iconOwner?.getAttribute('data-project-icon') || ''}`.toLowerCase();
 
     if (/cloud|remote|ssh|server|globe|host|vm|远程|云/i.test(meta)) return 'remote';
     if (/folder|local|dir|workspace|本地|文件夹/i.test(meta)) return 'local';
@@ -887,16 +934,16 @@
       return 'remote';
     }
 
+    // 多段贝塞尔云团弧线（如 Material / Codicon Cloud，优先于垂直线段判断以防 v-80 误判）
+    const curveCount = (dAll.match(/[cCqQ]/g) || []).length;
+    if (curveCount >= 3) {
+      return 'remote';
+    }
+
     // 文件夹图标包含较长的垂直侧壁直线段（如 V8 / v12 / v13 / v-480）
     const hasLongVerticalWall = /[vV]\s*-?(?:[5-9]|\d{2,})/.test(dAll);
     if (hasLongVerticalWall) {
       return 'local';
-    }
-
-    // 多段贝塞尔云团弧线（如 Material / Codicon Cloud）
-    const curveCount = (dAll.match(/[cCqQ]/g) || []).length;
-    if (curveCount >= 3) {
-      return 'remote';
     }
 
     return 'local';
@@ -932,6 +979,11 @@
     if (ariaLevel >= 2) {
       return { isProject: false, projectType: 'local' };
     }
+
+    const explicitProjIconEl = el.hasAttribute('data-project-icon')
+      ? el
+      : el.querySelector('[data-project-icon]');
+    const explicitProjIcon = (explicitProjIconEl?.getAttribute('data-project-icon') || '').toLowerCase();
 
     const rowRect = el.getBoundingClientRect();
     const maxGutterIconLeft = Math.max(
@@ -969,7 +1021,7 @@
       if (nonCircleShapes >= 1) {
         return {
           isProject: true,
-          projectType: classifyProjectSvgType(svg),
+          projectType: explicitProjIcon === 'cloud' ? 'remote' : classifyProjectSvgType(svg),
           iconEl: svg
         };
       }
@@ -983,13 +1035,13 @@
 
       const clsAndMeta = `${iconEl.getAttribute('class') || ''} ${iconEl.getAttribute('aria-label') || ''} ${
         iconEl.getAttribute('title') || ''
-      } ${iconEl.getAttribute('data-icon') || ''}`.toLowerCase();
+      } ${iconEl.getAttribute('data-icon') || ''} ${iconEl.getAttribute('data-project-icon') || ''}`.toLowerCase();
 
       if (/\b(codicon-cloud|codicon-remote|codicon-vm|codicon-globe|lucide-cloud|icon-cloud|remote-icon)\b/.test(clsAndMeta)) {
         return { isProject: true, projectType: 'remote', iconEl };
       }
       if (/\b(codicon-folder|codicon-root-folder|lucide-folder|icon-folder)\b/.test(clsAndMeta)) {
-        return { isProject: true, projectType: 'local', iconEl };
+        return { isProject: true, projectType: explicitProjIcon === 'cloud' ? 'remote' : 'local', iconEl };
       }
 
       if (isIconFontElement(iconEl)) {
@@ -998,12 +1050,16 @@
           return { isProject: true, projectType: 'remote', iconEl };
         }
         if (PROJECT_LOCAL_LIGATURES.has(lig) || /folder|workspace/.test(clsAndMeta)) {
-          return { isProject: true, projectType: 'local', iconEl };
+          return { isProject: true, projectType: explicitProjIcon === 'cloud' ? 'remote' : 'local', iconEl };
         }
         if (/^(chevron_right|expand_more|arrow_right|arrow_drop_down)$/.test(lig) || /chevron/.test(clsAndMeta)) {
           foundChevronInGutter = true;
         }
       }
+    }
+
+    if (explicitProjIcon === 'cloud') {
+      return { isProject: true, projectType: 'remote', iconEl: explicitProjIconEl || el };
     }
 
     if (foundChevronInGutter) {
@@ -1037,10 +1093,35 @@
    * 过滤底部实例切换器（如 `[ 🟢 workspace-instance ⌄ ]`）或底部导航栏条目
    */
   function isInstanceSwitcherOrFooterRow(rowEl, scope) {
+    if (
+      rowEl.matches?.(
+        '[data-testid="instance-selector-trigger"], [data-testid^="instance-selector-item-"], [role="listbox"]'
+      ) ||
+      rowEl.closest?.(
+        '[data-testid="instance-selector-trigger"], [data-testid^="instance-selector-item-"], [role="listbox"]'
+      ) ||
+      rowEl.querySelector?.('[data-testid="instance-selector-trigger"]')
+    ) {
+      return true;
+    }
+
+    if (scope.settingsEl) {
+      if (rowEl === scope.settingsEl || scope.settingsEl.contains(rowEl)) {
+        return true;
+      }
+      const posSettings = rowEl.compareDocumentPosition(scope.settingsEl);
+      if ((posSettings & Node.DOCUMENT_POSITION_PRECEDING) !== 0) {
+        return true;
+      }
+      if ((posSettings & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) {
+        return false;
+      }
+    }
+
     const r = rowEl.getBoundingClientRect();
     const cRect = scope.container.getBoundingClientRect();
 
-    // 若已确定 Settings 上边界，任何位于 Settings 及下方的行一律排除
+    // 若未定位到 Settings 节点，仅按几何坐标兜底排除底栏区域
     if (Number.isFinite(scope.maxBottomY) && r.bottom > scope.maxBottomY + 2) {
       return true;
     }
@@ -1255,7 +1336,8 @@
     const allEls = [rowEl, ...Array.from(rowEl.querySelectorAll('*'))];
     for (const el of allEls) {
       if (el === excludedProjectIconEl || (excludedProjectIconEl && excludedProjectIconEl.contains(el))) continue;
-      if (el !== rowEl && !isElementRendered(el, 1)) continue;
+      if (el !== rowEl && (!isElementRendered(el, 1) || isInsideHiddenRowActions(el, rowEl))) continue;
+      if (el !== rowEl && isInsideExplicitUnreadIndicator(el, rowEl)) continue;
       if (el !== rowEl && isSecondaryActionControl(el, rowEl)) continue;
 
       const label = (
@@ -1293,6 +1375,7 @@
       (s) =>
         s !== excludedProjectIconEl &&
         isElementRendered(s, 3) &&
+        !isInsideHiddenRowActions(s, rowEl) &&
         !isSecondaryActionControl(s, rowEl) &&
         !isThreeDotMenuSvg(s)
     );
@@ -1346,7 +1429,7 @@
         if (!svgAnimating && paths.length >= 1 && paths.length <= 5 && sRect.left > rowRect.left + rowRect.width * 0.52) {
           const dCombined = paths.map((p) => p.getAttribute('d') || '').join(' ');
           if (
-            /M10\.3\s*21|M13\.73\s*21|M6\s*8a6\s*6|M18\s*8A6\s*6|M12\s*9v4|M12\s*8v4|M9\.09\s*9a3\s*3|M11\s*18h2v-2h-2|M12\s*6c-2\.21\s*0-4\s*1\.79-4\s*4h2|M478-240q21|M480-240q21|M424-320q0-81|M14\s*2H6|M14\.5\s*2H6|M9\s*12h6|M9\s*16h6|M19\s*3H5|M320-240h320/i.test(
+            /M10\.3\s*21|M13\.73\s*21|M6\s*8a6\s*6|M18\s*8A6\s*6|M12\s*9v4|M12\s*8v4|M9\.09\s*9a3\s*3|M11\s*18h2v-2h-2|M12\s*6c-2\.21\s*0-4\s*1\.79-4\s*4h2|M478-240q21|M480-240q21|M424-320q0-81|M508\.5-267\.21|m-57\.27-131\.4h56\.31|M14\s*2H6|M14\.5\s*2H6|M9\s*12h6|M9\s*16h6|M19\s*3H5|M320-240h320/i.test(
               dCombined
             )
           ) {
@@ -1356,20 +1439,30 @@
       }
     }
 
-    // 检测「正在运行 (running)」：旋转动画、四圆点 (circle/rect) 工作图标、或右侧 ◉ 停止按钮
+    // 检测「正在运行 (running)」：旋转动画、四圆点 (circle/rect) 工作图标、或明确运行徽标
     if (hasActiveSpinOrLoopAnimation(rowEl)) {
-      return { state: 'running', reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar') };
+      return {
+        state: 'running',
+        explicitRunning: true,
+        reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar')
+      };
     }
 
     for (const el of allEls) {
-      if (el !== rowEl && !isElementRendered(el, 2)) continue;
+      if (el !== rowEl && (!isElementRendered(el, 2) || isInsideHiddenRowActions(el, rowEl))) continue;
       if (el.getAttribute('role') === 'progressbar') {
-        return { state: 'running', reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar') };
+        return {
+          state: 'running',
+          explicitRunning: true,
+          reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar')
+        };
       }
+      const dataTestId = (el.getAttribute('data-testid') || '').toLowerCase();
       const label = (
         el.getAttribute('aria-label') ||
         el.getAttribute('title') ||
         el.getAttribute('data-tooltip') ||
+        dataTestId ||
         ''
       ).toLowerCase();
       if (
@@ -1378,12 +1471,25 @@
           label
         )
       ) {
-        return { state: 'running', reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar') };
+        const isExplicitStatusIndicator =
+          dataTestId.includes('status-task-running') ||
+          /working|running|generating|thinking|loading|in\s*progress|运行中|执行中|加载中/i.test(
+            label
+          );
+        return {
+          state: 'running',
+          explicitRunning: Boolean(isExplicitStatusIndicator),
+          reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar')
+        };
       }
       if (isIconFontElement(el)) {
         const lig = (el.textContent || '').trim().toLowerCase();
         if (RUNNING_LIGATURES.has(lig)) {
-          return { state: 'running', reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar') };
+          return {
+            state: 'running',
+            explicitRunning: true,
+            reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar')
+          };
         }
       }
     }
@@ -1392,10 +1498,18 @@
       const sRect = svg.getBoundingClientRect();
       if (sRect.width > 38 || sRect.height > 38) continue;
       if (isFourDotWorkingSvg(svg)) {
-        return { state: 'running', reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar') };
+        return {
+          state: 'running',
+          explicitRunning: true,
+          reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar')
+        };
       }
       if (sRect.left > rowRect.left + rowRect.width * 0.45 && isStopCircleRunningSvg(svg)) {
-        return { state: 'running', reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar') };
+        return {
+          state: 'running',
+          explicitRunning: true,
+          reason: t('reasonSidebarRunningAnim', {}, 'Running indicator in sidebar')
+        };
       }
     }
 
@@ -1413,7 +1527,7 @@
     }
 
     for (const el of allEls) {
-      if (el === rowEl || !isElementRendered(el, 3)) continue;
+      if (el === rowEl || !isElementRendered(el, 3) || isInsideHiddenRowActions(el, rowEl)) continue;
       if (el === excludedProjectIconEl || (excludedProjectIconEl && excludedProjectIconEl.contains(el))) continue;
       if (isSecondaryActionControl(el, rowEl)) continue;
 
@@ -1421,10 +1535,15 @@
         el.getAttribute('aria-label') ||
         el.getAttribute('title') ||
         el.getAttribute('data-tooltip') ||
+        el.getAttribute('data-testid') ||
         ''
       ).toLowerCase();
       if (label && /\bunread\b|new\s*message|new\s*reply|未读/i.test(label)) {
-        return { state: 'unread', reason: t('reasonSidebarUnreadDot', {}, 'Unread indicator in sidebar') };
+        return {
+          state: 'unread',
+          explicitUnread: true,
+          reason: t('reasonSidebarUnreadDot', {}, 'Unread indicator in sidebar')
+        };
       }
 
       if (isIconFontElement(el)) {
@@ -1473,10 +1592,11 @@
   }
 
   /**
-   * 在侧边栏容器内查找底部 `Settings` / `设置` 行上边界，严格截断其下方的实例选择器（如底部工作区切换器）
+   * 在侧边栏容器内查找底部 `Settings` / `设置` 行上边界与节点，配合 DOM 顺序精确排除底栏与实例选择器
    */
   function findSettingsCutoffY(container, minTopY, maxSidebarRight) {
     let cutoffY = Infinity;
+    let settingsEl = null;
     const nodes = container.querySelectorAll('a, button, div, span, li');
     for (const el of nodes) {
       if (!isElementVisible(el, 8)) continue;
@@ -1506,10 +1626,34 @@
         const topY = rowWrap.getBoundingClientRect().top - 2;
         if (topY < cutoffY) {
           cutoffY = topY;
+          settingsEl = rowWrap;
         }
       }
     }
-    return cutoffY;
+    if (!settingsEl) {
+      settingsEl = container.querySelector('[data-testid="instance-selector-trigger"]');
+    }
+    return { cutoffY, settingsEl };
+  }
+
+  function findProjectsScrollContainer(container, headingEl, settingsEl) {
+    if (!container || !headingEl) return null;
+    const triggerEl = container.querySelector('[data-testid="instance-selector-trigger"]');
+    let cur = headingEl.parentElement;
+    while (cur && cur !== container && cur !== document.body) {
+      const containsFooter =
+        (settingsEl && cur.contains(settingsEl)) || (triggerEl && cur.contains(triggerEl));
+      if (!containsFooter) {
+        try {
+          const ov = window.getComputedStyle(cur).overflowY;
+          if (ov === 'auto' || ov === 'scroll' || ov === 'overlay') {
+            return cur;
+          }
+        } catch {}
+      }
+      cur = cur.parentElement;
+    }
+    return null;
   }
 
   function findSidebarScope() {
@@ -1557,12 +1701,23 @@
         anc = anc.parentElement;
       }
       if (bestContainer) {
-        const maxBottomY = findSettingsCutoffY(bestContainer, hRect.bottom, maxSidebarRight);
+        const { cutoffY, settingsEl } = findSettingsCutoffY(
+          bestContainer,
+          hRect.bottom,
+          maxSidebarRight
+        );
+        const projectsScrollEl = findProjectsScrollContainer(
+          bestContainer,
+          projectsHeadingEl,
+          settingsEl
+        );
         return {
           container: bestContainer,
           headingBottom: hRect.bottom - 2,
           headingLeftX: hRect.left,
-          maxBottomY,
+          maxBottomY: cutoffY,
+          settingsEl,
+          projectsScrollEl,
           headingEl: projectsHeadingEl
         };
       }
@@ -1575,12 +1730,14 @@
       if (!isElementVisible(el, 80)) continue;
       const r = el.getBoundingClientRect();
       if (r.left <= 90 && r.width >= 130 && r.right <= maxSidebarRight + 20 && r.height >= 140) {
-        const maxBottomY = findSettingsCutoffY(el, r.top + 24, maxSidebarRight);
+        const { cutoffY, settingsEl } = findSettingsCutoffY(el, r.top + 24, maxSidebarRight);
         return {
           container: el,
           headingBottom: r.top,
           headingLeftX: r.left + 8,
-          maxBottomY,
+          maxBottomY: cutoffY,
+          settingsEl,
+          projectsScrollEl: null,
           headingEl: null
         };
       }
@@ -1613,7 +1770,7 @@
   }
 
   function collectSidebarRowElements(scope) {
-    const { container, headingBottom, maxBottomY, headingEl } = scope;
+    const { container, headingBottom, maxBottomY, settingsEl, projectsScrollEl, headingEl } = scope;
     const cRect = container.getBoundingClientRect();
     const allDescendants = Array.from(container.querySelectorAll('*'));
 
@@ -1621,11 +1778,33 @@
     for (const el of allDescendants) {
       if (el === headingEl || (headingEl && headingEl.contains(el))) continue;
       if (el.closest(EXCLUDED_CODE_SELECTOR)) continue;
+      if (
+        el.matches(
+          '[data-testid="instance-selector-trigger"], [data-testid^="instance-selector-item-"], [role="listbox"]'
+        ) ||
+        el.closest(
+          '[data-testid="instance-selector-trigger"], [data-testid^="instance-selector-item-"], [role="listbox"]'
+        )
+      ) {
+        continue;
+      }
       if (!isElementVisible(el, 16)) continue;
 
+      let isBeforeSettingsInDom = false;
+      if (settingsEl) {
+        if (el === settingsEl || settingsEl.contains(el) || el.contains(settingsEl)) continue;
+        const pos = el.compareDocumentPosition(settingsEl);
+        if ((pos & Node.DOCUMENT_POSITION_PRECEDING) !== 0) continue;
+        isBeforeSettingsInDom = (pos & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      }
+
       const r = el.getBoundingClientRect();
-      if (r.top < headingBottom - 2) continue;
-      if (Number.isFinite(maxBottomY) && r.bottom > maxBottomY + 2) continue;
+      const inIndependentScrollArea =
+        Boolean(projectsScrollEl && headingEl && projectsScrollEl.contains(el) && !projectsScrollEl.contains(headingEl)) &&
+        !el.contains(headingEl) &&
+        (el.compareDocumentPosition(headingEl) & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+      if (!inIndependentScrollArea && r.top < headingBottom - 2) continue;
+      if (!isBeforeSettingsInDom && Number.isFinite(maxBottomY) && r.bottom > maxBottomY + 2) continue;
       if (r.width < Math.min(90, cRect.width * 0.48) || r.width > cRect.width + 12) continue;
       if (r.height < 18 || r.height > 44) continue;
       if (hasVerticallyStackedTextChildren(el)) continue;
@@ -1723,6 +1902,25 @@
     return Boolean(activeConvId && resolvedId && resolvedId === activeConvId);
   }
 
+  function resolveBridgeReason(bt) {
+    if (bt.state === 'idle' && bt.timeText) {
+      return t('reasonActiveTime', { time: bt.timeText }, `Active ${bt.timeText}`);
+    }
+    if (bt.reasonCode) {
+      const translated = t(bt.reasonCode, bt.reasonVars || {}, bt.reason || '');
+      if (bt.reasonVars?.detail && !translated.includes(bt.reasonVars.detail)) {
+        return `${translated} (${bt.reasonVars.detail})`;
+      }
+      return translated;
+    }
+    return (
+      bt.reason ||
+      (bt.timeText
+        ? t('reasonActiveTime', { time: bt.timeText }, `Active ${bt.timeText}`)
+        : t('reasonMemIdle', {}, 'Idle (memory sync)'))
+    );
+  }
+
   function hydrateProjectTasksFromBridgeOrCache(proj, bridgeEntry, breadcrumb, activePaneResult) {
     if (bridgeEntry && Array.isArray(bridgeEntry.tasks) && bridgeEntry.tasks.length > 0) {
       proj.tasks = bridgeEntry.tasks.map((bt, idx) => {
@@ -1754,7 +1952,9 @@
           convId: resolved.convId,
           title: bt.title,
           state: st,
-          confirmedRunning: Boolean(st === 'running' && bt.confirmedDetail),
+          confirmedRunning: Boolean(
+            st === 'running' && (bt.confirmedDetail || bt.confirmedNotWaiting || isBcActive)
+          ),
           reason: rsn,
           timeText: bt.timeText || '',
           isActive: isBcActive,
@@ -1824,10 +2024,10 @@
     return false;
   }
 
-  function scanSidebarHiddenProjects(activePaneResult) {
+  function scanSidebarHiddenProjects(activePaneResult, { forceBridge = false } = {}) {
     const breadcrumb = detectMainPaneBreadcrumb();
     const knownNames = lastKnownSidebarProjects.map((p) => p.projectName).filter(Boolean);
-    const bridgeMap = queryMainWorldBridge(knownNames);
+    const bridgeMap = queryMainWorldBridge(knownNames, forceBridge);
     const projects = [];
     const seenLower = new Set();
 
@@ -1868,10 +2068,10 @@
     return projects;
   }
 
-  function scanSidebarProjects(activePaneResult) {
+  function scanSidebarProjects(activePaneResult, { forceBridge = false } = {}) {
     const scope = findSidebarScope();
     if (!scope) {
-      const hiddenProjects = scanSidebarHiddenProjects(activePaneResult);
+      const hiddenProjects = scanSidebarHiddenProjects(activePaneResult, { forceBridge });
       if (hiddenProjects.length > 0) {
         return hiddenProjects;
       }
@@ -1899,7 +2099,7 @@
     }
 
     if (extracted.length === 0) {
-      queryMainWorldBridge([]);
+      queryMainWorldBridge([], forceBridge);
       return [];
     }
 
@@ -1947,7 +2147,7 @@
     }
 
     if (parsedRows.length === 0) {
-      queryMainWorldBridge([]);
+      queryMainWorldBridge([], forceBridge);
       return [];
     }
 
@@ -2042,6 +2242,10 @@
 
       let finalState = row.signal.state;
       let finalReason = row.signal.reason;
+      const explicitUnread = Boolean(row.signal.explicitUnread);
+      const explicitRunning = Boolean(
+        row.signal.explicitRunning || (row.isActive && activePaneResult.state === 'running')
+      );
 
       if (row.isActive) {
         if (activePaneResult.state === 'waiting') {
@@ -2050,7 +2254,7 @@
         } else if (activePaneResult.state === 'running' && finalState !== 'waiting') {
           finalState = 'running';
           finalReason = activePaneResult.reason;
-        } else if (finalState === 'unread') {
+        } else if (finalState === 'unread' && !explicitUnread && !document.hidden) {
           finalState = 'idle';
           finalReason = '';
         }
@@ -2063,7 +2267,8 @@
         taskId: taskKey,
         title: row.title,
         state: finalState,
-        confirmedRunning: false,
+        explicitUnread: finalState === 'unread' && explicitUnread,
+        confirmedRunning: Boolean(finalState === 'running' && explicitRunning),
         hasStaticRightStatusIcon,
         reason:
           finalReason ||
@@ -2081,28 +2286,9 @@
     }
 
     // 机制 1：向 MAIN world 桥接器 (`page-bridge.js`) 查询 React Fiber / QueryCache / 网络流中的折叠项目对话与远程标记
-    const bridgeMap = queryMainWorldBridge(projects.map((p) => p.projectName));
+    const bridgeMap = queryMainWorldBridge(projects.map((p) => p.projectName), forceBridge);
     const stateRank = { waiting: 4, unread: 3, running: 2, idle: 1 };
     const uncachedCollapsedNames = [];
-
-    const resolveBridgeReason = (bt) => {
-      if (bt.state === 'idle' && bt.timeText) {
-        return t('reasonActiveTime', { time: bt.timeText }, `Active ${bt.timeText}`);
-      }
-      if (bt.reasonCode) {
-        const translated = t(bt.reasonCode, bt.reasonVars || {}, bt.reason || '');
-        if (bt.reasonVars?.detail && !translated.includes(bt.reasonVars.detail)) {
-          return `${translated} (${bt.reasonVars.detail})`;
-        }
-        return translated;
-      }
-      return (
-        bt.reason ||
-        (bt.timeText
-          ? t('reasonActiveTime', { time: bt.timeText }, `Active ${bt.timeText}`)
-          : t('reasonMemIdle', {}, 'Idle (memory sync)'))
-      );
-    };
 
     for (const proj of projects) {
       const bridgeEntry = bridgeMap ? bridgeMap[proj.projectName] : null;
@@ -2117,7 +2303,11 @@
             const matched = bridgeEntry.tasks.find(
               (bt) => matchesBreadcrumbTitle(domTask.title, bt.title)
             );
-            domTask.confirmedRunning = Boolean(matched?.state === 'running' && matched?.confirmedDetail);
+            domTask.confirmedRunning = Boolean(
+              domTask.confirmedRunning ||
+                (matched?.state === 'running' &&
+                  (matched?.confirmedDetail || matched?.confirmedNotWaiting))
+            );
             if (matched && !domTask.isActive) {
               if (matched.state === 'waiting') {
                 domTask.state = 'waiting';
@@ -2267,17 +2457,25 @@
   let lastBridgeDiagnostics = [];
   let lastBridgeTelemetry = null;
 
-  function queryMainWorldBridge(projectNames) {
+  let lastScannedRemoteHostKey = '';
+
+  function queryMainWorldBridge(projectNames, forceBridge = false) {
     if (!document.documentElement) return null;
     const safeNames = Array.isArray(projectNames) ? projectNames : [];
     try {
       const rootEl = document.documentElement;
       rootEl.removeAttribute('data-agy-bridge-out');
+      if (forceBridge) {
+        rootEl.setAttribute('data-agy-bridge-force', '1');
+      } else {
+        rootEl.removeAttribute('data-agy-bridge-force');
+      }
       rootEl.setAttribute('data-agy-bridge-in', JSON.stringify(safeNames));
       window.dispatchEvent(new CustomEvent('__AGY_BRIDGE_REQ__'));
       const rawOut = rootEl.getAttribute('data-agy-bridge-out');
       rootEl.removeAttribute('data-agy-bridge-in');
       rootEl.removeAttribute('data-agy-bridge-out');
+      rootEl.removeAttribute('data-agy-bridge-force');
       if (!rawOut) return null;
       const parsed = JSON.parse(rawOut);
       if (parsed && parsed.ok) {
@@ -2409,24 +2607,233 @@
     return true;
   }
 
-  function scanWorkspace() {
-    if (isLocalContext && !isLocalAntigravityConfirmed()) {
-      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
+  function extractHostOptionLabel(el) {
+    if (!el || !(el instanceof Element)) return '';
+    const rawTitle = (el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const p = node.parentElement;
+        if (!p || p.closest(EXCLUDED_CODE_SELECTOR)) return NodeFilter.FILTER_REJECT;
+        if (p.closest('[aria-hidden="true"], svg, .visually-hidden, .sr-only')) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (isIconFontElement(p)) return NodeFilter.FILTER_REJECT;
+        const txt = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+        return txt ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      }
+    });
+    const parts = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      const txt = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+      if (txt) parts.push(txt);
     }
-    if (!isTop && (window.innerWidth < 60 || window.innerHeight < 60 || !document.body)) {
-      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
+    const textLabel = parts.join(' ').replace(/\s+/g, ' ').trim();
+    if (rawTitle && (!textLabel || textLabel.endsWith('...') || textLabel.endsWith('…'))) {
+      return rawTitle;
     }
-    if (!isTop && document.getElementById('tabCanvas') && document.getElementById('zoomCanvas')) {
-      return { ignore: true, activePane: { state: 'none', reason: '' }, projects: [], telemetry: null };
+    return textLabel || rawTitle;
+  }
+
+  function hasGreenOnlineDot(el) {
+    if (!el || !(el instanceof Element)) return false;
+    try {
+      if (el.querySelector('.bg-success')) return true;
+      for (const sub of el.querySelectorAll('span, div, i, circle')) {
+        const sr = sub.getBoundingClientRect();
+        if (sr.width >= 3 && sr.width <= 12 && sr.height >= 3 && sr.height <= 12) {
+          const st = window.getComputedStyle(sub);
+          const col = parseRgba(
+            sub.tagName.toLowerCase() === 'circle'
+              ? sub.getAttribute('fill') || st.fill
+              : st.backgroundColor
+          );
+          if (col && col.g > 135 && col.g > col.r + 25) {
+            return true;
+          }
+        }
+      }
+    } catch {}
+    return false;
+  }
+
+  function scanRemoteHostInfo() {
+    if (!document.body) return { remoteHost: null, remoteHosts: [] };
+    const optionEls = Array.from(document.querySelectorAll('[data-testid^="instance-selector-item-"]'));
+    const remoteHosts = [];
+    const seenIds = new Set();
+
+    for (const el of optionEls) {
+      const testId = el.getAttribute('data-testid') || '';
+      const id = testId.slice('instance-selector-item-'.length).trim();
+      if (!id || seenIds.has(id)) continue;
+      seenIds.add(id);
+      const label = extractHostOptionLabel(el) || id;
+      const isSpecial = id.startsWith('__');
+      const selected =
+        el.getAttribute('aria-selected') === 'true' || el.getAttribute('data-state') === 'checked';
+      const online = isSpecial ? null : hasGreenOnlineDot(el);
+      remoteHosts.push({ id, label, selected, online, isSpecial });
     }
 
+    const trigger =
+      document.querySelector('[data-testid="instance-selector-trigger"]') ||
+      document.querySelector('nav [role="combobox"][aria-haspopup="listbox"], aside [role="combobox"][aria-haspopup="listbox"]');
+
+    let remoteHost = remoteHosts.find((h) => h.selected) || null;
+    if (!remoteHost && trigger) {
+      const triggerLabel = (
+        trigger.getAttribute('title') ||
+        extractHostOptionLabel(trigger) ||
+        ''
+      )
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (triggerLabel) {
+        const lower = triggerLabel.toLowerCase();
+        const matched = remoteHosts.find((h) => h.label.toLowerCase() === lower);
+        if (matched) {
+          matched.selected = true;
+          remoteHost = matched;
+        } else {
+          remoteHost = {
+            id: '',
+            label: triggerLabel,
+            selected: true,
+            online: hasGreenOnlineDot(trigger),
+            isSpecial: false
+          };
+        }
+      }
+    }
+
+    const nextHostKey = remoteHost?.id || remoteHost?.label || '';
+    if (lastScannedRemoteHostKey && nextHostKey && nextHostKey !== lastScannedRemoteHostKey) {
+      frameCollapsedCache.clear();
+      probedProjectNames.clear();
+      lastKnownSidebarProjects.length = 0;
+    }
+    if (nextHostKey) {
+      lastScannedRemoteHostKey = nextHostKey;
+    }
+
+    return { remoteHost, remoteHosts };
+  }
+
+  function findHostOptionById(hostId) {
+    if (!hostId || !document.body) return null;
+    const expectedTestId = `instance-selector-item-${hostId}`;
+    for (const el of document.querySelectorAll('[data-testid^="instance-selector-item-"]')) {
+      if (el.getAttribute('data-testid') === expectedTestId) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function dispatchUiClick(el) {
+    if (!el) return false;
+    try {
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+      }
+    } catch {}
+    try {
+      el.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function switchRemoteHost(hostId) {
+    if ((isLocalContext && !isLocalAntigravityConfirmed()) || !hostId || !document.body) {
+      return false;
+    }
+    const cleanId = String(hostId).trim();
+    if (!cleanId) return false;
+
+    const existingItem = findHostOptionById(cleanId);
+    if (existingItem && existingItem.getBoundingClientRect().height > 0) {
+      return dispatchUiClick(existingItem);
+    }
+
+    const trigger =
+      document.querySelector('[data-testid="instance-selector-trigger"]') ||
+      document.querySelector('nav [role="combobox"][aria-haspopup="listbox"], aside [role="combobox"][aria-haspopup="listbox"]');
+    if (!trigger) {
+      return existingItem ? dispatchUiClick(existingItem) : false;
+    }
+
+    if (trigger.getAttribute('aria-expanded') !== 'true') {
+      dispatchUiClick(trigger);
+    }
+
+    void (async () => {
+      let fallbackEl = existingItem || null;
+      for (let i = 0; i < 12; i++) {
+        await sleepMs(50);
+        const candidate = findHostOptionById(cleanId);
+        if (candidate) {
+          fallbackEl = candidate;
+          if (candidate.getBoundingClientRect().height > 0) {
+            dispatchUiClick(candidate);
+            notifyProbeListeners();
+            return;
+          }
+        }
+      }
+      if (fallbackEl) {
+        dispatchUiClick(fallbackEl);
+        notifyProbeListeners();
+      }
+    })();
+
+    return true;
+  }
+
+  function scanWorkspace({ forceBridge = false } = {}) {
+    if (isLocalContext && !isLocalAntigravityConfirmed()) {
+      return {
+        ignore: true,
+        activePane: { state: 'none', reason: '' },
+        projects: [],
+        telemetry: null,
+        remoteHost: null,
+        remoteHosts: []
+      };
+    }
+    if (!isTop && (window.innerWidth < 60 || window.innerHeight < 60 || !document.body)) {
+      return {
+        ignore: true,
+        activePane: { state: 'none', reason: '' },
+        projects: [],
+        telemetry: null,
+        remoteHost: null,
+        remoteHosts: []
+      };
+    }
+    if (!isTop && document.getElementById('tabCanvas') && document.getElementById('zoomCanvas')) {
+      return {
+        ignore: true,
+        activePane: { state: 'none', reason: '' },
+        projects: [],
+        telemetry: null,
+        remoteHost: null,
+        remoteHosts: []
+      };
+    }
+
+    const { remoteHost, remoteHosts } = scanRemoteHostInfo();
     const activePane = detectActivePaneState();
-    const projects = scanSidebarProjects(activePane);
+    const projects = scanSidebarProjects(activePane, { forceBridge });
     return {
       ignore: false,
       activePane,
       projects,
-      telemetry: lastBridgeTelemetry
+      telemetry: lastBridgeTelemetry,
+      remoteHost,
+      remoteHosts
     };
   }
 
@@ -2570,6 +2977,9 @@
   --cap-comp-text: #854d0e;
   --cap-focus: #0284c7;
   --cap-health: #5E9E8E;
+  --cap-cache-warm: #245a4e;
+  --cap-cache-cooling: #7c581d;
+  --cap-btn-cooling: #854d0e;
 }
 @media (prefers-color-scheme: dark) {
   :host {
@@ -2590,6 +3000,9 @@
     --cap-comp-bg: rgba(198, 162, 101, 0.2);
     --cap-comp-text: #fde68a;
     --cap-focus: #38bdf8;
+    --cap-cache-warm: #7ec4b2;
+    --cap-cache-cooling: #e4c283;
+    --cap-btn-cooling: #e4c283;
   }
 }
 @supports (color: light-dark(white, black)) {
@@ -2611,6 +3024,9 @@
     --cap-comp-bg: light-dark(rgba(198, 162, 101, 0.16), rgba(198, 162, 101, 0.2));
     --cap-comp-text: light-dark(#854d0e, #fde68a);
     --cap-focus: light-dark(#0284c7, #38bdf8);
+    --cap-cache-warm: light-dark(#245a4e, #7ec4b2);
+    --cap-cache-cooling: light-dark(#7c581d, #e4c283);
+    --cap-btn-cooling: light-dark(#854d0e, #e4c283);
   }
 }
 .capsule-wrap {
@@ -2659,6 +3075,11 @@
 }
 .cap-speed,
 .cap-ctx {
+  font-variant-numeric: tabular-nums;
+}
+.cap-cache-cooling {
+  color: var(--cap-btn-cooling);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .cap-sep {
@@ -2774,6 +3195,16 @@
   text-align: end;
   font-variant-numeric: tabular-nums;
 }
+.tip-val.is-cache-warm {
+  color: var(--cap-cache-warm);
+}
+.tip-val.is-cache-cooling {
+  color: var(--cap-cache-cooling);
+  font-weight: 600;
+}
+.tip-val.is-cache-cold {
+  color: var(--cap-tip-muted);
+}
 .tip-breakdown,
 .tip-est-notice {
   margin-block-start: 4px;
@@ -2799,10 +3230,17 @@
   background: var(--cap-warn-bg);
   color: var(--cap-warn-text);
 }
-.tip-quota-wrap {
+.tip-quota-wrap,
+.tip-session-wrap {
   margin-block-start: 6px;
   padding-block-start: 5px;
   border-block-start: 1px solid var(--cap-divider);
+}
+.tip-session-detail {
+  margin-block-start: 3px;
+  font-size: 11px;
+  color: var(--cap-tip-muted);
+  font-variant-numeric: tabular-nums;
 }
 .tip-foot {
   margin-block-start: 6px;
@@ -2862,6 +3300,14 @@
   .tip-used-badge {
     color: Highlight;
   }
+  .cap-cache-cooling,
+  .tip-val.is-cache-cooling {
+    color: Highlight;
+  }
+  .tip-val.is-cache-warm,
+  .tip-val.is-cache-cold {
+    color: CanvasText;
+  }
 }
 `;
 
@@ -2874,6 +3320,82 @@
       return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
     }
     return String(Math.round(n));
+  }
+
+  function formatCapsuleDuration(ms) {
+    const totalMins = Math.max(1, Math.round(ms / 60000));
+    const hours = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    return hours > 0 ? (mins > 0 ? `${hours}h ${mins}m` : `${hours}h`) : `${totalMins}m`;
+  }
+
+  function formatCapsuleLatency(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n < 1000) return `${Math.round(n)}ms`;
+    if (n < 60000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}s`;
+    const mins = Math.floor(n / 60000);
+    const secs = Math.round((n % 60000) / 1000);
+    return secs >= 60 ? `${mins + 1}m 0s` : `${mins}m ${secs}s`;
+  }
+
+  function inferCapsulePoolKey(modelId, modelLabel, telemetry) {
+    const models = Array.isArray(telemetry?.models) ? telemetry.models : [];
+    const lowId = String(modelId || '').trim().toLowerCase();
+    const lowLabel = String(modelLabel || '').trim().toLowerCase();
+    for (const m of models) {
+      if (!m || typeof m !== 'object') continue;
+      if (
+        (lowId && String(m.modelId || '').trim().toLowerCase() === lowId) ||
+        (lowLabel && String(m.label || '').trim().toLowerCase() === lowLabel)
+      ) {
+        if (m.pool === 'gemini' || m.pool === 'premium') return m.pool;
+      }
+    }
+    const upper = `${String(modelId || '')} ${String(modelLabel || '')}`.toUpperCase();
+    if (/CLAUDE|OPUS|SONNET|GPT|OSS/.test(upper)) return 'premium';
+    if (/GEMINI|ARGON|FLASH|HYDROGEN/.test(upper)) return 'gemini';
+    return null;
+  }
+
+  function evaluateCapsulePoolDisplay(pool, fetchedAt, nowMs = Date.now()) {
+    if (!pool || typeof pool !== 'object') {
+      return { paceRatio: null, paceStatus: null, etaMs: null, unusedPreResetHint: false };
+    }
+    const rawFrac = pool.remainingFraction;
+    const resetTimeMs = Number(pool.resetTimeMs);
+    if (typeof rawFrac !== 'number' || !Number.isFinite(rawFrac)) {
+      return { paceRatio: null, paceStatus: null, etaMs: null, unusedPreResetHint: false };
+    }
+    const frac = Math.max(0, Math.min(1, rawFrac));
+    if (!Number.isFinite(resetTimeMs) || resetTimeMs <= 946684800000 || resetTimeMs <= nowMs) {
+      return { paceRatio: null, paceStatus: null, etaMs: null, unusedPreResetHint: false };
+    }
+    const timeLeftMs = resetTimeMs - nowMs;
+    const timeLeftRatio = Math.min(1, Math.max(0, timeLeftMs / (5 * 60 * 60 * 1000)));
+    const rawPace =
+      frac <= 0 ? 0 : timeLeftRatio > 0.02 ? frac / timeLeftRatio : Math.max(1, frac / 0.02);
+    const paceRatio = Number.isFinite(rawPace)
+      ? Math.round(Math.min(9.9, Math.max(0, rawPace)) * 100 + 1e-9) / 100
+      : null;
+    let paceStatus = null;
+    if (paceRatio !== null) {
+      if (paceRatio >= 1.1) paceStatus = 'comfortable';
+      else if (paceRatio < 0.7 && frac < 0.8) paceStatus = 'fast';
+      else paceStatus = 'balanced';
+    }
+    const unusedPreResetHint = Boolean(
+      timeLeftMs > 0 && timeLeftMs <= 30 * 60 * 1000 && frac >= 0.4
+    );
+    let etaMs = null;
+    if (typeof pool.etaMs === 'number' && Number.isFinite(pool.etaMs) && pool.etaMs > 0 && frac > 0) {
+      const elapsed = Math.max(0, nowMs - (Number(fetchedAt) || nowMs));
+      const adj = pool.etaMs - elapsed;
+      if (adj > 0 && adj < timeLeftMs) {
+        etaMs = Math.max(60_000, Math.round(adj));
+      }
+    }
+    return { paceRatio, paceStatus, etaMs, unusedPreResetHint };
   }
 
   function formatCapsuleResetCountdown(resetTimeMs) {
@@ -2926,6 +3448,15 @@
     const shouldOpen = !state.dismissedByEsc && (state.hoverBtn || state.hoverTip || state.focused);
     state.isOpen = shouldOpen;
     if (shouldOpen) {
+      if (state.lastPayload) {
+        updateCapsuleState(
+          state,
+          state.lastPayload.convData,
+          state.lastPayload.compEntry,
+          state.lastPayload.telemetry,
+          state.lastPayload.pricingConfig
+        );
+      }
       positionCapsuleTooltip(state);
       state.tip.setAttribute('data-open', 'true');
       openCapsuleStates.add(state);
@@ -3039,11 +3570,23 @@
     ctxSpan.className = 'cap-ctx';
     ctxSpan.textContent = '~0/256k, 0%';
 
+    const coolingSepSpan = document.createElement('span');
+    coolingSepSpan.className = 'cap-sep';
+    coolingSepSpan.setAttribute('aria-hidden', 'true');
+    coolingSepSpan.textContent = '·';
+    coolingSepSpan.hidden = true;
+
+    const coolingTagSpan = document.createElement('span');
+    coolingTagSpan.className = 'cap-cache-cooling';
+    coolingTagSpan.hidden = true;
+
     btn.appendChild(boltSvg);
     btn.appendChild(speedSpan);
     btn.appendChild(sepSpan);
     btn.appendChild(gaugeSvg);
     btn.appendChild(ctxSpan);
+    btn.appendChild(coolingSepSpan);
+    btn.appendChild(coolingTagSpan);
 
     const tip = document.createElement('div');
     tip.id = 'agy-cap-tip';
@@ -3068,17 +3611,35 @@
     const ctxRow = createCapsuleRow();
     const remainRow = createCapsuleRow();
     const speedRow = createCapsuleRow();
+    const latencyRow = createCapsuleRow();
+    latencyRow.row.hidden = true;
 
     const exactWrap = document.createElement('div');
     exactWrap.className = 'tip-exact-wrap';
     const cacheRow = createCapsuleRow();
+    const cacheFreshRow = createCapsuleRow();
+    cacheFreshRow.row.hidden = true;
     const breakdownEl = document.createElement('div');
     breakdownEl.className = 'tip-breakdown';
     exactWrap.appendChild(cacheRow.row);
+    exactWrap.appendChild(cacheFreshRow.row);
     exactWrap.appendChild(breakdownEl);
 
     const estNoticeEl = document.createElement('div');
     estNoticeEl.className = 'tip-est-notice';
+
+    const sessionWrap = document.createElement('div');
+    sessionWrap.className = 'tip-session-wrap';
+    sessionWrap.hidden = true;
+    const sessionRow = createCapsuleRow();
+    const costRow = createCapsuleRow();
+    costRow.row.hidden = true;
+    const sessionDetailEl = document.createElement('div');
+    sessionDetailEl.className = 'tip-session-detail';
+    sessionDetailEl.hidden = true;
+    sessionWrap.appendChild(sessionRow.row);
+    sessionWrap.appendChild(costRow.row);
+    sessionWrap.appendChild(sessionDetailEl);
 
     const compressedEl = document.createElement('div');
     compressedEl.className = 'tip-compressed';
@@ -3102,8 +3663,10 @@
     tip.appendChild(ctxRow.row);
     tip.appendChild(remainRow.row);
     tip.appendChild(speedRow.row);
+    tip.appendChild(latencyRow.row);
     tip.appendChild(exactWrap);
     tip.appendChild(estNoticeEl);
+    tip.appendChild(sessionWrap);
     tip.appendChild(compressedEl);
     tip.appendChild(warnEl);
     tip.appendChild(quotaWrap);
@@ -3124,6 +3687,8 @@
       speedSpan,
       gaugeFill,
       ctxSpan,
+      coolingSepSpan,
+      coolingTagSpan,
       modelEl,
       usedBadgeEl,
       barFill,
@@ -3133,11 +3698,25 @@
       remainValEl: remainRow.valEl,
       speedKeyEl: speedRow.keyEl,
       speedValEl: speedRow.valEl,
+      latencyRow: latencyRow.row,
+      latencyKeyEl: latencyRow.keyEl,
+      latencyValEl: latencyRow.valEl,
       exactWrap,
       cacheKeyEl: cacheRow.keyEl,
       cacheValEl: cacheRow.valEl,
+      cacheFreshRow: cacheFreshRow.row,
+      cacheFreshKeyEl: cacheFreshRow.keyEl,
+      cacheFreshValEl: cacheFreshRow.valEl,
       breakdownEl,
       estNoticeEl,
+      sessionWrap,
+      sessionRow: sessionRow.row,
+      sessionKeyEl: sessionRow.keyEl,
+      sessionValEl: sessionRow.valEl,
+      costRow: costRow.row,
+      costKeyEl: costRow.keyEl,
+      costValEl: costRow.valEl,
+      sessionDetailEl,
       compressedEl,
       warnEl,
       quotaWrap,
@@ -3150,7 +3729,8 @@
       dismissedByEsc: false,
       isOpen: false,
       hideTimer: null,
-      lastDigest: ''
+      lastDigest: '',
+      lastPayload: null
     };
 
     btn.addEventListener('mouseenter', () => {
@@ -3198,7 +3778,8 @@
     return state;
   }
 
-  function updateCapsuleState(state, convData, compEntry, telemetry) {
+  function updateCapsuleState(state, convData, compEntry, telemetry, pricingConfig = null) {
+    state.lastPayload = { convData, compEntry, telemetry, pricingConfig };
     const precision = convData?.precision === 'exact' ? 'exact' : 'estimated';
     const contextUsed = Math.max(0, Number(convData?.contextUsed) || 0);
     const contextLimit = Math.max(1, Number(convData?.contextLimit) || 256000);
@@ -3247,6 +3828,104 @@
     const compDrop = Math.min(99, Math.max(0, Math.round(Number(convData?.compressionDrop) || 0)));
     const stepCount = Math.max(0, Math.round(Number(convData?.stepCount) || 0));
 
+    const lastStepDurationMs =
+      typeof convData?.lastStepDurationMs === 'number' &&
+      Number.isFinite(convData.lastStepDurationMs) &&
+      convData.lastStepDurationMs > 0
+        ? Math.round(convData.lastStepDurationMs)
+        : null;
+    const lastStepTtftMs =
+      typeof convData?.lastStepTtftMs === 'number' &&
+      Number.isFinite(convData.lastStepTtftMs) &&
+      convData.lastStepTtftMs > 0
+        ? Math.round(convData.lastStepTtftMs)
+        : null;
+
+    const sessionTotalTokens = Math.max(0, Number(convData?.sessionTotalTokens) || 0);
+    const sessionStepPricedCount = Math.max(
+      0,
+      Math.round(Number(convData?.sessionStepPricedCount) || 0)
+    );
+    const sessionReasoningTokens = Math.max(0, Number(convData?.sessionReasoningTokens) || 0);
+    const sessionCacheCreationTokens = Math.max(
+      0,
+      Number(convData?.sessionCacheCreationTokens) || 0
+    );
+    const sessionCacheWrite5mTokens = Math.max(
+      0,
+      Number(convData?.sessionCacheWrite5mTokens) || 0
+    );
+    const sessionCacheWrite1hTokens = Math.max(
+      0,
+      Number(convData?.sessionCacheWrite1hTokens) || 0
+    );
+    const subagentTotalTokens = Math.max(0, Number(convData?.subagentTotalTokens) || 0);
+
+    const activeModelId = convData?.modelId || compEntry?.modelId || '';
+    const poolKey = inferCapsulePoolKey(activeModelId, modelLabel, telemetry);
+    const poolObj = poolKey ? telemetry?.quotaPools?.[poolKey] || null : null;
+    const livePool = evaluateCapsulePoolDisplay(poolObj, telemetry?.fetchedAt, Date.now());
+    const remQuotaPct =
+      remFrac !== null ? Math.min(100, Math.max(0, Math.round(remFrac * 100))) : 0;
+    let quotaCueSuffix = '';
+    if (remFrac !== null) {
+      if (livePool.etaMs && livePool.etaMs > 0 && remQuotaPct > 0) {
+        quotaCueSuffix = ` · ${t('quotaEtaShort', { time: formatCapsuleDuration(livePool.etaMs) }, `ETA ~${formatCapsuleDuration(livePool.etaMs)}`)}`;
+      } else if (livePool.unusedPreResetHint) {
+        quotaCueSuffix = ` · ${t('quotaPreResetBadge', {}, 'Spare')}`;
+      } else if (livePool.paceRatio !== null) {
+        quotaCueSuffix = ` · ${t('quotaPaceShort', { pace: livePool.paceRatio.toFixed(1) }, `Pace ${livePool.paceRatio.toFixed(1)}x`)}`;
+      }
+    }
+
+    const pricingApi =
+      typeof window !== 'undefined' ? window.__AGY_PRICING__ : globalThis.__AGY_PRICING__;
+    const normPricingCfg = pricingApi?.normalizePricingConfig?.(pricingConfig) || null;
+    const activeCurrency = normPricingCfg?.currency || 'USD';
+    const nowMs = Date.now();
+    const fresh = pricingApi?.evaluateCacheFreshness?.(convData, nowMs) || null;
+    const reduceMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let freshBucket = 'none';
+    if (fresh) {
+      if (fresh.state === 'cold') {
+        freshBucket = `cold:${fresh.ttlTier}`;
+      } else if (fresh.state === 'warm' && !state.isOpen) {
+        freshBucket = `warm:${fresh.ttlTier}:${Math.floor(fresh.remainingMs / 15000)}`;
+      } else if (reduceMotion) {
+        freshBucket = `${fresh.state}:${fresh.ttlTier}:${Math.ceil(fresh.remainingMs / 5000)}`;
+      } else {
+        freshBucket = `${fresh.state}:${fresh.ttlTier}:${Math.ceil(fresh.remainingMs / 1000)}`;
+      }
+    }
+    let costStr = '';
+    let savedStr = '';
+    if (sessionTotalTokens > 0 && sessionStepPricedCount > 0 && pricingApi?.computeSessionCost) {
+      const costRes = pricingApi.computeSessionCost(
+        {
+          modelId: activeModelId,
+          modelLabel,
+          sessionInputTokens: convData?.sessionInputTokens || 0,
+          sessionCacheReadTokens: convData?.sessionCacheReadTokens || 0,
+          sessionCacheCreationTokens: sessionCacheCreationTokens,
+          sessionCacheWrite5mTokens: sessionCacheWrite5mTokens,
+          sessionCacheWrite1hTokens: sessionCacheWrite1hTokens,
+          sessionOutputTokens: convData?.sessionOutputTokens || 0,
+          sessionReasoningTokens: sessionReasoningTokens
+        },
+        normPricingCfg
+      );
+      if (costRes && costRes.actualCost !== null) {
+        costStr = pricingApi.formatCostValue(costRes.actualCost, activeCurrency, { approx: true });
+        if (costRes.cacheSaved > 0) {
+          savedStr = pricingApi.formatCostValue(costRes.cacheSaved, activeCurrency, { approx: true });
+        }
+      } else {
+        costStr = '--';
+      }
+    }
+
     const digest = JSON.stringify([
       precision,
       usedDisplay,
@@ -3258,6 +3937,7 @@
       modelLabel,
       remFrac,
       countdown,
+      quotaCueSuffix,
       cacheHit,
       cacheReadStr,
       inputStr,
@@ -3267,7 +3947,19 @@
       compAfter,
       compDrop,
       stepCount,
-      telemetry?.fetchedAt || 0
+      lastStepDurationMs,
+      lastStepTtftMs,
+      sessionTotalTokens,
+      sessionStepPricedCount,
+      sessionReasoningTokens,
+      sessionCacheCreationTokens,
+      sessionCacheWrite5mTokens,
+      sessionCacheWrite1hTokens,
+      subagentTotalTokens,
+      activeCurrency,
+      costStr,
+      savedStr,
+      freshBucket
     ]);
     if (digest === state.lastDigest) return;
     state.lastDigest = digest;
@@ -3279,6 +3971,24 @@
     const speedBtnText = roundedSpeed > 0 ? `${roundedSpeed} tok/s` : '-- tok/s';
     state.speedSpan.textContent = speedBtnText;
     state.ctxSpan.textContent = `${usedDisplay}/${limitStr}, ${usagePercent}%`;
+    if (fresh?.state === 'cooling') {
+      const btnCountdownStr =
+        pricingApi?.formatCacheCountdown?.(fresh.remainingMs, {
+          compact: true,
+          coarse: reduceMotion
+        }) || '0s';
+      state.coolingSepSpan.hidden = false;
+      state.coolingTagSpan.hidden = false;
+      state.coolingTagSpan.textContent = t(
+        'capsuleBtnCoolingTag',
+        { time: btnCountdownStr },
+        `TTL ${btnCountdownStr}`
+      );
+    } else {
+      state.coolingSepSpan.hidden = true;
+      state.coolingTagSpan.hidden = true;
+      state.coolingTagSpan.textContent = '';
+    }
     state.btn.setAttribute(
       'aria-label',
       t(
@@ -3311,11 +4021,69 @@
           )
         : '-- tok/s';
 
+    if (lastStepTtftMs !== null || lastStepDurationMs !== null) {
+      state.latencyRow.hidden = false;
+      state.latencyKeyEl.textContent = t('capsuleLatencyLabel', {}, 'Step Latency');
+      const ttftStr = lastStepTtftMs !== null ? formatCapsuleLatency(lastStepTtftMs) : '';
+      const durStr = lastStepDurationMs !== null ? formatCapsuleLatency(lastStepDurationMs) : '';
+      if (ttftStr && durStr) {
+        state.latencyValEl.textContent = t(
+          'capsuleLatencyBoth',
+          { ttft: ttftStr, duration: durStr },
+          `TTFT ${ttftStr} · ${durStr}`
+        );
+      } else if (ttftStr) {
+        state.latencyValEl.textContent = t(
+          'capsuleLatencyTtft',
+          { ttft: ttftStr },
+          `TTFT ${ttftStr}`
+        );
+      } else {
+        state.latencyValEl.textContent = durStr;
+      }
+    } else {
+      state.latencyRow.hidden = true;
+    }
+
     if (precision === 'exact') {
       state.exactWrap.hidden = false;
       state.estNoticeEl.hidden = true;
       state.cacheKeyEl.textContent = t('capsuleCacheHitLabel', {}, 'Prompt Cache Hit');
       state.cacheValEl.textContent = `${cacheHit}%`;
+      if (fresh) {
+        state.cacheFreshRow.hidden = false;
+        const baseFreshLabel = t('capsuleCacheTtlLabel', {}, 'Cache Freshness');
+        state.cacheFreshKeyEl.textContent =
+          fresh.ttlTier === '1h' ? `${baseFreshLabel} (1h)` : baseFreshLabel;
+        state.cacheFreshValEl.className = `tip-val is-cache-${fresh.state}`;
+        const tipTimeStr =
+          pricingApi?.formatCacheCountdown?.(fresh.remainingMs, {
+            compact: true,
+            coarse: reduceMotion
+          }) || '0s';
+        if (fresh.state === 'warm') {
+          state.cacheFreshValEl.textContent = t(
+            'capsuleCacheWarmVal',
+            { time: tipTimeStr },
+            `Warm · ${tipTimeStr}`
+          );
+        } else if (fresh.state === 'cooling') {
+          state.cacheFreshValEl.textContent = t(
+            'capsuleCacheCoolingVal',
+            { time: tipTimeStr },
+            `Cooling · ${tipTimeStr}`
+          );
+        } else {
+          state.cacheFreshValEl.textContent = t(
+            'capsuleCacheColdVal',
+            {},
+            'Cold (rebuilds next turn)'
+          );
+        }
+      } else {
+        state.cacheFreshRow.hidden = true;
+        state.cacheFreshValEl.textContent = '';
+      }
       state.breakdownEl.textContent = t(
         'capsuleBreakdownLine',
         { cache: cacheReadStr, input: inputStr, output: outputStr },
@@ -3323,12 +4091,91 @@
       );
     } else {
       state.exactWrap.hidden = true;
+      state.cacheFreshRow.hidden = true;
+      state.cacheFreshValEl.textContent = '';
       state.estNoticeEl.hidden = false;
       state.estNoticeEl.textContent = t(
         'capsuleEstNotice',
         {},
         'Estimated from visible steps'
       );
+    }
+
+    if (sessionTotalTokens > 0 || subagentTotalTokens > 0) {
+      state.sessionWrap.hidden = false;
+      if (sessionTotalTokens > 0) {
+        state.sessionRow.hidden = false;
+        state.sessionKeyEl.textContent = t('capsuleSessionTotalLabel', {}, 'Session Total');
+        state.sessionValEl.textContent = t(
+          'capsuleSessionTotalVal',
+          { total: formatCapsuleTokens(sessionTotalTokens), steps: sessionStepPricedCount },
+          `${formatCapsuleTokens(sessionTotalTokens)} (${sessionStepPricedCount} steps)`
+        );
+      } else {
+        state.sessionRow.hidden = true;
+      }
+      if (sessionTotalTokens > 0 && sessionStepPricedCount > 0 && costStr) {
+        state.costRow.hidden = false;
+        state.costKeyEl.textContent = t('capsuleCostLabel', {}, 'Est. API Value');
+        state.costValEl.textContent = savedStr
+          ? t(
+              'capsuleCostValSaved',
+              { cost: costStr, saved: savedStr },
+              `${costStr} (saved ${savedStr})`
+            )
+          : costStr;
+      } else {
+        state.costRow.hidden = true;
+      }
+      const detailParts = [];
+      if (sessionReasoningTokens > 0) {
+        detailParts.push(
+          t(
+            'ctxReasoningStat',
+            { tokens: formatCapsuleTokens(sessionReasoningTokens) },
+            `Reasoning ${formatCapsuleTokens(sessionReasoningTokens)}`
+          )
+        );
+      }
+      if (sessionCacheCreationTokens > 0) {
+        if (sessionCacheWrite5mTokens > 0 || sessionCacheWrite1hTokens > 0) {
+          detailParts.push(
+            t(
+              'ctxCacheWriteTiered',
+              {
+                w5m: formatCapsuleTokens(sessionCacheWrite5mTokens),
+                w1h: formatCapsuleTokens(sessionCacheWrite1hTokens)
+              },
+              `Cache write 5m ${formatCapsuleTokens(sessionCacheWrite5mTokens)} / 1h ${formatCapsuleTokens(sessionCacheWrite1hTokens)}`
+            )
+          );
+        } else {
+          detailParts.push(
+            t(
+              'ctxCacheWriteFlat',
+              { tokens: formatCapsuleTokens(sessionCacheCreationTokens) },
+              `Cache write ${formatCapsuleTokens(sessionCacheCreationTokens)}`
+            )
+          );
+        }
+      }
+      if (subagentTotalTokens > 0) {
+        detailParts.push(
+          t(
+            'ctxSubagentStat',
+            { tokens: formatCapsuleTokens(subagentTotalTokens) },
+            `Subagents ${formatCapsuleTokens(subagentTotalTokens)}`
+          )
+        );
+      }
+      if (detailParts.length > 0) {
+        state.sessionDetailEl.hidden = false;
+        state.sessionDetailEl.textContent = detailParts.join(' · ');
+      } else {
+        state.sessionDetailEl.hidden = true;
+      }
+    } else {
+      state.sessionWrap.hidden = true;
     }
 
     if (compDetected) {
@@ -3354,10 +4201,10 @@
     }
 
     if (remFrac !== null) {
-      const remQuotaPct = Math.min(100, Math.max(0, Math.round(remFrac * 100)));
       state.quotaWrap.hidden = false;
       state.quotaKeyEl.textContent = t('capsuleQuotaRowLabel', {}, '5h Remaining Quota');
-      state.quotaValEl.textContent = countdown ? `${remQuotaPct}% · ${countdown}` : `${remQuotaPct}%`;
+      const baseQuota = countdown ? `${remQuotaPct}% · ${countdown}` : `${remQuotaPct}%`;
+      state.quotaValEl.textContent = `${baseQuota}${quotaCueSuffix}`;
     } else {
       state.quotaWrap.hidden = true;
     }
@@ -3377,7 +4224,57 @@
     }
   }
 
-  function syncInPageCapsules(enabled, telemetry) {
+  function harvestLedgerDeltas(cursorMap = {}, projects = []) {
+    if (isLocalContext && !isLocalAntigravityConfirmed()) return [];
+    const rootEl = document.documentElement;
+    if (!rootEl) return [];
+
+    const projectByConvId = new Map();
+    if (Array.isArray(projects)) {
+      for (const proj of projects) {
+        const pName = String(proj?.projectName || '').trim();
+        if (!pName || !Array.isArray(proj?.tasks)) continue;
+        for (const task of proj.tasks) {
+          if (task?.convId) {
+            projectByConvId.set(String(task.convId), pName);
+          }
+        }
+      }
+    }
+
+    let rawOut = '';
+    try {
+      const cleanCursors = cursorMap && typeof cursorMap === 'object' ? cursorMap : {};
+      rootEl.setAttribute('data-agy-ledger-in', JSON.stringify(cleanCursors));
+      window.dispatchEvent(new Event('__AGY_BRIDGE_LEDGER_REQ__'));
+      rawOut = rootEl.getAttribute('data-agy-ledger-out') || '';
+    } catch {
+      rawOut = '';
+    } finally {
+      try {
+        rootEl.removeAttribute('data-agy-ledger-in');
+        rootEl.removeAttribute('data-agy-ledger-out');
+      } catch {}
+    }
+
+    if (!rawOut) return [];
+    try {
+      const parsed = JSON.parse(rawOut);
+      if (!parsed?.ok || !Array.isArray(parsed.batches)) return [];
+      return parsed.batches.map((batch) => {
+        const cid = String(batch?.convId || '').trim();
+        const fallbackProj = projectByConvId.get(cid) || '';
+        return {
+          ...batch,
+          projectName: String(batch?.projectName || fallbackProj || '').trim()
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  function syncInPageCapsules(enabled, telemetry, pricingConfig = null) {
     if (!enabled || (isLocalContext && !isLocalAntigravityConfirmed()) || !document.body) {
       removeAllCapsules();
       return;
@@ -3422,7 +4319,7 @@
         (convId && convs[convId]) ||
         (telemetry?.activeConvId && convs[telemetry.activeConvId]) ||
         null;
-      updateCapsuleState(state, convData, compEntry, telemetry || null);
+      updateCapsuleState(state, convData, compEntry, telemetry || null, pricingConfig);
     }
 
     for (const host of document.querySelectorAll(`[${CAPSULE_HOST_ATTR}="1"]`)) {
@@ -3441,11 +4338,13 @@
   window.__AGY_SCANNER__ = {
     scanWorkspace,
     focusTaskById,
+    switchRemoteHost,
     probeCollapsedProjects,
     onProbeComplete,
     scanDiagnostics,
     isLocalAntigravityConfirmed,
-    syncInPageCapsules
+    syncInPageCapsules,
+    harvestLedgerDeltas
   };
 })();
 

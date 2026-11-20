@@ -6,8 +6,8 @@
  * 1. JavaScript syntax across all extension scripts via vm.Script
  * 2. Manifest V3 structure, strictly scoped permissions & content_scripts, script ordering
  * 3. All 10 _locales/<locale>/messages.json files and 132-char description limit
- * 4. 161-key 10-locale parity & placeholder parity in i18n.js + host guard behavior
- * 5. CSP compliance & postMessage origin-safety checks across JS/HTML
+ * 4. 282-key 10-locale parity & placeholder parity in i18n.js + host guard & SW sandbox behavior
+ * 5. CSP compliance, pricing.js P2 helpers/Magpie loopback matrix & postMessage origin-safety checks across JS/HTML
  * 6. PNG header/dimension/metadata-chunk/permission checks in icons/
  * 7. PII, local user path, email, and workspace-identifier leak checks
  */
@@ -23,6 +23,7 @@ const LOCALES = ['en', 'zh_CN', 'zh_TW', 'ja', 'ko', 'es', 'fr', 'de', 'pt_BR', 
 const JS_FILES = [
   'background.js',
   'i18n.js',
+  'pricing.js',
   'page-bridge.js',
   'scanner.js',
   'content.js',
@@ -32,6 +33,7 @@ const JS_FILES = [
 const ALLOWED_HOSTS_RE =
   /^https:\/\/(\*\.)?(antigravity\.google(\.com)?|usercontent\.goog|gstatic\.com)\/\*$/i;
 const EXPECTED_OPTIONAL_HOSTS = ['http://localhost/*', 'http://127.0.0.1/*'];
+const EXPECTED_OPTIONAL_PERMISSIONS = ['notifications'];
 const EXPECTED_ICONS = {
   'icons/icon16.png': 16,
   'icons/icon32.png': 32,
@@ -86,6 +88,12 @@ assert(
     manifest.permissions.includes('sidePanel') &&
     manifest.permissions.includes('scripting'),
   'manifest.json: permissions must strictly equal ["storage", "sidePanel", "scripting"]'
+);
+assert(
+  Array.isArray(manifest.optional_permissions) &&
+    manifest.optional_permissions.length === EXPECTED_OPTIONAL_PERMISSIONS.length &&
+    EXPECTED_OPTIONAL_PERMISSIONS.every((p) => manifest.optional_permissions.includes(p)),
+  'manifest.json: optional_permissions must strictly equal ["notifications"]'
 );
 assert(
   Array.isArray(manifest.host_permissions) && manifest.host_permissions.length > 0,
@@ -143,8 +151,8 @@ for (const cs of manifest.content_scripts || []) {
   }
   if ((cs.world || 'ISOLATED') !== 'MAIN' && Array.isArray(cs.js)) {
     assert(
-      cs.js[0] === 'i18n.js',
-      `manifest.json: ISOLATED content script [${cs.js.join(', ')}] must load i18n.js first`
+      cs.js[0] === 'i18n.js' && cs.js[1] === 'pricing.js',
+      `manifest.json: ISOLATED content script [${cs.js.join(', ')}] must load i18n.js then pricing.js first`
     );
   }
 }
@@ -171,7 +179,7 @@ for (const loc of LOCALES) {
 }
 checks.push(`_locales/*/messages.json validated (${LOCALES.length} locales)`);
 
-// 4. i18n.js 161-key parity, placeholder consistency, and origin guard tests
+// 4. i18n.js 282-key parity, placeholder consistency, and origin guard tests
 const referencedKeys = new Set();
 const panelHtmlEntries = [
   { file: 'popup.html', expectedSurface: 'popup', content: readRel('popup.html') },
@@ -182,7 +190,7 @@ for (const { content } of panelHtmlEntries) {
     referencedKeys.add(m[1]);
   }
 }
-for (const file of ['popup.js', 'content.js', 'scanner.js']) {
+for (const file of ['popup.js', 'content.js', 'scanner.js', 'background.js']) {
   const code = readRel(file);
   for (const m of code.matchAll(/\bt\(\s*['"]([a-zA-Z0-9_]+)['"]/g)) {
     referencedKeys.add(m[1]);
@@ -193,8 +201,8 @@ for (const m of bridgeCode.matchAll(/reasonCode:\s*['"]([a-zA-Z0-9_]+)['"]/g)) {
   referencedKeys.add(m[1]);
 }
 assert(
-  referencedKeys.size === 161,
-  `Expected 161 referenced i18n keys, found ${referencedKeys.size}`
+  referencedKeys.size === 282,
+  `Expected 282 referenced i18n keys, found ${referencedKeys.size}`
 );
 
 const i18nSrc = readRel('i18n.js');
@@ -206,21 +214,29 @@ function extractPlaceholders(str) {
     .join(',');
 }
 
-function loadI18nWithEnv({ loc = 'en', location = undefined } = {}) {
+function loadI18nWithEnv({ loc = 'en', location = undefined, hasWindow = true } = {}) {
   const bcp47 = loc.replace('_', '-');
-  const win = {};
-  if (location !== undefined) {
+  const win = hasWindow ? {} : undefined;
+  if (hasWindow && location !== undefined) {
     win.location = location;
   }
   const sandbox = {
-    window: win,
     navigator: { language: bcp47, languages: [bcp47] },
     chrome: { i18n: { getUILanguage: () => bcp47 } },
     document: { documentElement: { lang: '' }, querySelectorAll: () => [] }
   };
+  if (hasWindow) {
+    sandbox.window = win;
+  }
+  sandbox.globalThis = sandbox;
   vm.runInNewContext(i18nSrc, sandbox, { filename: 'i18n.js' });
-  return sandbox.window.__AGY_I18N__;
+  return sandbox.__AGY_I18N__ || sandbox.window?.__AGY_I18N__;
 }
+
+assert(
+  Boolean(loadI18nWithEnv({ loc: 'en', hasWindow: false })),
+  'i18n.js failed to initialize globalThis.__AGY_I18N__ in Service Worker (no window)'
+);
 
 const enPlaceholders = new Map();
 for (const loc of LOCALES) {
@@ -354,9 +370,140 @@ assert(
   ),
   'i18n.js guard blocked 127.0.0.1 about:blank child frame'
 );
-checks.push(`i18n 161-key parity, placeholder parity & host guard verified (${LOCALES.length} locales)`);
+checks.push(`i18n 282-key parity, placeholder parity & host/SW guard verified (${LOCALES.length} locales)`);
+
+// 4b. pricing.js sandbox, origin-guard & P2 helper matrix
+const pricingSrc = readRel('pricing.js');
+
+function loadPricingWithEnv({ location = undefined, hasWindow = true } = {}) {
+  const win = hasWindow ? {} : undefined;
+  if (hasWindow && location !== undefined) {
+    win.location = location;
+  }
+  const sandbox = {
+    TextEncoder,
+    URL,
+    Date,
+    Math,
+    Object,
+    Array,
+    Map,
+    Set,
+    Number,
+    String,
+    Boolean,
+    RegExp,
+    JSON
+  };
+  if (hasWindow) {
+    sandbox.window = win;
+  } else if (location !== undefined) {
+    sandbox.location = location;
+  }
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(pricingSrc, sandbox, { filename: 'pricing.js' });
+  return sandbox.__AGY_PRICING__;
+}
+
+assert(
+  Boolean(
+    loadPricingWithEnv({
+      hasWindow: false,
+      location: { protocol: 'chrome-extension:', hostname: 'ext-id' }
+    })
+  ),
+  'pricing.js failed to initialize in Service Worker globalThis (no window)'
+);
+assert(
+  Boolean(
+    loadPricingWithEnv({
+      location: { protocol: 'chrome-extension:', hostname: 'ext-id', ancestorOrigins: [] }
+    })
+  ),
+  'pricing.js guard blocked chrome-extension: popup page'
+);
+assert(
+  Boolean(
+    loadPricingWithEnv({
+      location: { protocol: 'https:', hostname: 'antigravity.google.com', ancestorOrigins: [] }
+    })
+  ),
+  'pricing.js guard blocked antigravity.google.com'
+);
+assert(
+  Boolean(
+    loadPricingWithEnv({
+      location: { protocol: 'http:', hostname: 'localhost', ancestorOrigins: [] }
+    })
+  ),
+  'pricing.js guard blocked http://localhost'
+);
+assert(
+  Boolean(
+    loadPricingWithEnv({
+      location: {
+        protocol: 'https:',
+        hostname: 'antigravity.static.usercontent.goog',
+        ancestorOrigins: ['https://antigravity.google.com']
+      }
+    })
+  ),
+  'pricing.js guard failed to allow usercontent.goog iframe under Antigravity ancestor'
+);
+assert(
+  loadPricingWithEnv({
+    location: { protocol: 'https:', hostname: 'example.com', ancestorOrigins: [] }
+  }) === undefined,
+  'pricing.js guard failed to exit on non-Antigravity origin'
+);
+assert(
+  loadPricingWithEnv({
+    location: {
+      protocol: 'https:',
+      hostname: 'antigravity.static.usercontent.goog',
+      ancestorOrigins: ['https://example.com']
+    }
+  }) === undefined,
+  'pricing.js guard failed to exit on usercontent.goog iframe with non-Antigravity ancestor'
+);
+const pricingApi = loadPricingWithEnv({
+  hasWindow: false,
+  location: { protocol: 'chrome-extension:', hostname: 'ext-id' }
+});
+assert(
+  typeof pricingApi?.evaluateCacheFreshness === 'function' &&
+    typeof pricingApi?.evaluateQuotaNotificationTransitions === 'function' &&
+    typeof pricingApi?.validateMagpieBaseUrl === 'function',
+  'pricing.js missing P2 exported helpers'
+);
+assert(
+  pricingApi?.validateMagpieBaseUrl('http://127.0.0.1:3425')?.ok === true &&
+    pricingApi?.validateMagpieBaseUrl('http://localhost:4310')?.ok === true,
+  'pricing.js validateMagpieBaseUrl failed to accept valid loopback URLs'
+);
+for (const badMagpieUrl of [
+  'https://127.0.0.1:3425',
+  'http://evil.com:3425',
+  'http://192.168.1.2:3425',
+  'http://0.0.0.0:3425',
+  'http://user:pw@127.0.0.1:3425',
+  'http://127.0.0.1:3425/v1?x=1',
+  'http://127.0.0.1:80',
+  'http://127.0.0.1:9222'
+]) {
+  assert(
+    pricingApi?.validateMagpieBaseUrl(badMagpieUrl)?.ok === false,
+    `pricing.js validateMagpieBaseUrl failed to reject "${badMagpieUrl}"`
+  );
+}
+checks.push('pricing.js sandbox, origin-guard & P2 Magpie loopback matrix verified');
 
 // 5. CSP, MV3 & cross-frame safety checks
+assert(
+  panelHtmlEntries[0].content.replace('data-surface="popup"', 'data-surface="__SURFACE__"') ===
+    panelHtmlEntries[1].content.replace('data-surface="sidepanel"', 'data-surface="__SURFACE__"'),
+  'popup.html and sidepanel.html must remain 100% synchronized except data-surface'
+);
 for (const { file, expectedSurface, content } of panelHtmlEntries) {
   assert(
     new RegExp(`<html\\b[^>]*\\bdata-surface="${expectedSurface}"`, 'i').test(content),
@@ -373,25 +520,54 @@ for (const { file, expectedSurface, content } of panelHtmlEntries) {
   );
   const scripts = [...content.matchAll(/<script\s+src="([^"]+)"/gi)].map((m) => m[1]);
   assert(
-    scripts.length === 2 && scripts[0] === 'i18n.js' && scripts[1] === 'popup.js',
-    `${file}: expected scripts [i18n.js, popup.js], got [${scripts.join(', ')}]`
+    scripts.length === 3 &&
+      scripts[0] === 'i18n.js' &&
+      scripts[1] === 'pricing.js' &&
+      scripts[2] === 'popup.js',
+    `${file}: expected scripts [i18n.js, pricing.js, popup.js], got [${scripts.join(', ')}]`
   );
 }
 for (const file of JS_FILES) {
   const code = readRel(file);
   assert(!/\beval\s*\(/.test(code), `${file}: eval() is prohibited`);
   assert(!/\bnew\s+Function\s*\(/.test(code), `${file}: new Function() is prohibited`);
-  assert(
-    !/URL\.createObjectURL\s*\(/.test(code),
-    `${file}: URL.createObjectURL() (Blob URL) is prohibited`
-  );
+  if (file === 'popup.js') {
+    const createCount = [...code.matchAll(/URL\.createObjectURL\s*\(/g)].length;
+    assert(
+      createCount <= 1,
+      `${file}: expected at most 1 URL.createObjectURL() call, found ${createCount}`
+    );
+    if (createCount === 1) {
+      assert(
+        /URL\.revokeObjectURL\s*\(/.test(code),
+        `${file}: URL.createObjectURL() must be paired with URL.revokeObjectURL()`
+      );
+    }
+  } else {
+    assert(
+      !/URL\.createObjectURL\s*\(/.test(code),
+      `${file}: URL.createObjectURL() (Blob URL) is prohibited`
+    );
+  }
   assert(!/\bnew\s+Worker\s*\(/.test(code), `${file}: new Worker() is prohibited`);
   assert(
     !/\.postMessage\s*\([^;]+,\s*['"]\*['"]\s*\)/.test(code),
     `${file}: wildcard postMessage(..., "*") is prohibited`
   );
 }
-checks.push('CSP & cross-frame postMessage safety verified');
+const bgCode = readRel('background.js');
+if (/chrome\.notifications\.create\b/.test(bgCode)) {
+  assert(existsRel('icons/icon128.png'), 'background.js uses notifications but icons/icon128.png is missing');
+  assert(
+    /chrome\.runtime\.getURL\s*\(\s*['"]icons\/icon128\.png['"]\s*\)/.test(bgCode),
+    'background.js must reference icons/icon128.png via chrome.runtime.getURL'
+  );
+}
+assert(
+  /redirect:\s*['"]error['"]/.test(bgCode) && /credentials:\s*['"]omit['"]/.test(bgCode),
+  'background.js Magpie fetch must enforce redirect: "error" and credentials: "omit"'
+);
+checks.push('CSP, notification icon & cross-frame postMessage safety verified');
 
 // 6. PNG binary integrity & permission checks
 for (const [relIcon, expectedDim] of Object.entries(EXPECTED_ICONS)) {

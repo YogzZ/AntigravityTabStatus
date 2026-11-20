@@ -1,6 +1,6 @@
 **English** | [简体中文](./README.zh-CN.md)
 
-# Antigravity Tab Status (`v2.9.0`)
+# Antigravity Tab Status (`v2.10.0`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-34a853.svg)](./manifest.json)
@@ -12,14 +12,19 @@ A lightweight, privacy-first **Manifest V3** browser extension (Chrome / Edge / 
 
 ---
 
-## Key Features (`v2.9.0`)
+## Key Features (`v2.10.0`)
 
-- **5-Hour Model Quota Pools, Context Tokens & Streaming `tok/s` Telemetry**
-  - **5h Quota Pool Strip:** Displays live remaining quota percentages and reset countdowns across `Gemini` and `Claude / GPT` pools in the Popup and Side Panel using native `<progress>` health bars.
-  - **Per-Chat Context & Speed Metrics:** Surfaces context token usage (`used/limit, pct%`), live streaming `tok/s`, auto-compaction drop chips (`-drop%`), and exact Cache / In / Out / Hit% tooltips when exact `modelUsage` snapshots are available (falling back honestly to `~estimated` without fabricating cache ratios).
+- **On-Device Token Ledger, Offline Pricing & Usage Analytics Drawer**
+  - **Deduplicated Usage Ledger (`agyUsageLedgerV1`):** Tracks cumulative input, output, reasoning, and tiered `5m`/`1h` prompt-cache tokens locally in `chrome.storage.local` (300-conversation high-watermark deduplication, 90-day retention, `< 250 KB` cap, zero prompt or reply text ever stored).
+  - **100% Offline Pricing Engine (`pricing.js`):** Computes equivalent API cost and prompt-cache savings in `USD` or `CNY` with editable per-model `/ 1M` rate overrides (`agyPricingConfigV1`).
+  - **Collapsible Analytics Drawer (`#usageDrawer`):** Inspect `Today | 7d | 30d` KPIs, SVG trend charts, a 28-day activity heatmap, Top Models/Projects breakdowns, safe JSON/CSV export, and 2-step `Clear History`.
+- **5-Hour Model Quota Pools, Pace/ETA, Context Telemetry & Cache Freshness**
+  - **5h Quota Pool Strip & Optional Desktop Alerts:** Displays remaining quota percentages, reset countdowns, burn-rate `Pace` badges, depletion `ETA`, and pre-reset spare-quota hints across `Gemini` and `Claude / GPT` pools. Optionally enable **Quota desktop alerts** (`optional_permissions: ["notifications"]`, off by default) for local allowance-recovery and pre-reset reminders.
+  - **Per-Chat Context, Speed & `coldAfter` Countdown:** Surfaces context token usage (`used/limit, pct%`), live streaming `tok/s`, auto-compaction drop chips (`-drop%`), `5m`/`1h` prompt-cache `coldAfter` freshness countdowns (`warm` / `cooling` / `cold`), and exact Cache / In / Out / Hit% + session cost tooltips.
   - **Optional In-Page Composer Capsule (Off by Default):** Enable **Show in-page composer capsule** in settings (`showInPageCapsule`) to mount an isolated Shadow DOM usage pill (`WeakMap`-backed, zero `innerHTML`/`localStorage`, WCAG 1.4.13 hover/keyboard/Escape tooltip) next to Antigravity's composer controls.
-- **Opt-In Localhost Desktop Webview Support**
+- **Opt-In Localhost Desktop Webview & Optional Local Magpie Gateway**
   - Click **Enable** next to **Local Antigravity (localhost)** in settings to grant optional `http://localhost/*` and `http://127.0.0.1/*` access on demand (`optional_host_permissions` + `scripting`), revocable anytime. Even when enabled, scripts verify Antigravity host markers (`isVerifiedLocalAntigravity()`) and stay completely inert on unrelated local dev servers.
+  - Optionally enable the read-only **Local Magpie Gateway** card (`agyMagpieConfigV1`, default off) inside the Usage drawer to poll a validated local loopback endpoint (`http://127.0.0.1:<port>` / `http://localhost:<port>`) without mixing data into the Antigravity usage ledger.
 
 - **Cross-Tab Global Panel & Persistent Chrome Side Panel**
   - **Monitor from Any Webpage:** Click the toolbar icon on *any* website to view live Antigravity workspaces, projects, conversations, and global Waiting/Unread badge counts—no need to switch back to check progress.
@@ -74,7 +79,7 @@ A lightweight, privacy-first **Manifest V3** browser extension (Chrome / Edge / 
 ### Option B: Load or Package from Source
 
 1. Clone this repository (`git clone https://github.com/YogzZ/AntigravityTabStatus.git`).
-2. *(Optional)* Run verification and build a clean runtime-only archive (`dist/antigravity-tab-status-v2.9.0.zip`):
+2. *(Optional)* Run verification and build a clean runtime-only archive (`dist/antigravity-tab-status-v2.10.0.zip`):
    ```bash
    node scripts/verify.mjs
    bash scripts/package.sh
@@ -109,25 +114,28 @@ Antigravity Page & Iframes (ISOLATED world)
 
 | File / Directory | Purpose |
 | :--- | :--- |
-| `manifest.json` | Manifest V3 configuration (`v2.9.0`), `default_locale: "en"`, `storage` + `sidePanel` + `scripting` permissions, scoped `host_permissions`, opt-in `optional_host_permissions` (`localhost`/`127.0.0.1`), `MAIN` & `ISOLATED` content scripts |
-| `background.js` | MV3 Service Worker: `agy-timer` Port timers, `OffscreenCanvas` favicon pixel decoder, session-backed global toolbar badge aggregator, `actionClickMode` sync, opt-in localhost script registration/injection, and frame message relays |
-| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber, store, passive network observer (500ms cache, 40-conversation step summary cap), gated same-origin Connect-RPC, and v2.9.0 quota/context/tok/s telemetry engine |
-| `i18n.js` | Browser-language auto-detector and 161-key 10-locale dictionary (`window.__AGY_I18N__`) with Antigravity & opt-in localhost host guard |
-| `scanner.js` | Unified sidebar & active-pane scanner merging DOM, memory bridge snapshots/telemetry, collapsed-project caches, and opt-in isolated Shadow DOM composer capsule |
+| `manifest.json` | Manifest V3 configuration (`v2.10.0`), `default_locale: "en"`, `storage` + `sidePanel` + `scripting` permissions, opt-in `optional_permissions` (`notifications`) and `optional_host_permissions` (`localhost`/`127.0.0.1`), scoped `host_permissions`, `MAIN` & `ISOLATED` content scripts |
+| `background.js` | MV3 Service Worker: `agy-timer` Port timers, `OffscreenCanvas` favicon pixel decoder, session-backed global toolbar badge aggregator, `actionClickMode` sync, serialized usage ledger & notification state persistence, opt-in localhost script registration/injection, read-only local Magpie poller, and frame relays |
+| `pricing.js` | Universal offline pricing, currency (`USD`/`CNY`), deduplicated `agyUsageLedgerV1` helpers, prompt-cache `coldAfter` evaluator, quota notification state machine, and loopback Magpie URL validator (`globalThis.__AGY_PRICING__`) |
+| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber, store, passive network observer (500ms cache, 40-conversation step summary cap), gated same-origin Connect-RPC, dual-track token/latency telemetry, and priced-step ledger delta harvester |
+| `i18n.js` | Browser-language auto-detector and 282-key 10-locale dictionary (`globalThis.__AGY_I18N__`) supporting content scripts, UI pages, and the Service Worker with Antigravity & opt-in localhost host guard |
+| `scanner.js` | Unified sidebar & active-pane scanner merging DOM, memory bridge snapshots/telemetry, collapsed-project caches, ledger delta harvesting, and opt-in isolated Shadow DOM composer capsule |
 | `content.js` | Top-frame global priority & telemetry merger, 64x64 Canvas renderer (6 styles × 2 layouts), legacy title suffix cleaner, Shadow DOM capsule sync, and Port animation driver |
-| `frame-detector.js` | Child-iframe workspace scanner relaying state, telemetry, and Shadow DOM capsule updates |
-| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | Dual-surface light/dark UI (toolbar Popup + `100dvh` responsive Chrome Side Panel) with 5h quota pool strip, per-chat context/tok/s/compaction chips, cross-tab instance switcher, project/conversation jump list, 2x3 style picker, optional localhost toggle, preview mode, and diagnostics |
+| `frame-detector.js` | Child-iframe workspace scanner relaying state, telemetry, ledger deltas, and Shadow DOM capsule updates |
+| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | Dual-surface light/dark UI (toolbar Popup + `100dvh` responsive Chrome Side Panel) with 5h quota Pace/ETA strip, per-chat context/tok/s/compaction/`coldAfter` chips, collapsible `#usageDrawer` analytics, cross-tab switcher, project/conversation jump list, 2x3 style picker, optional localhost/notification/Magpie controls, preview mode, and diagnostics |
 | `_locales/` | Chrome extension localization files (`en`, `zh_CN`, `zh_TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt_BR`, `ru`) |
 | `icons/` | Extension icons (`16x16`, `32x32`, `48x48`, `128x128`) |
 | `AGENTS.md` | Contributor & AI agent engineering guidelines, Browser Support Policy, CSP rules, and verification commands |
 | `PLAN.md` | v2.6.0–v2.9.0 architectural breakdown and open-source roadmap |
+| `docs/` | P0/P1/P2 telemetry, ledger, pricing, notification, cache freshness, and Magpie technical specifications |
 | `CHANGELOG.md` | Version history following Keep a Changelog format |
-| `PRIVACY.md` | Privacy policy & `chrome.storage.sync` / permission disclosures |
+| `PRIVACY.md` | Privacy policy & `chrome.storage.sync` / `local` / `session` and permission disclosures |
 | `CHROMEWEBSTORE.md` | Chrome Web Store & Edge Add-ons listing copy, permission justifications, and submission checklist |
 | `LICENSE` | MIT License |
-| `scripts/verify.mjs` | Zero-dependency Node verification suite (syntax, MV3 & optional host scope, `_locales` & 161-key i18n parity, PNG integrity, leak scan) |
+| `scripts/verify.mjs` | Zero-dependency Node verification suite (syntax, MV3 & optional permission/host scope, `_locales` & 282-key i18n parity, `pricing.js` sandbox & Magpie loopback matrix, CSP/security, PNG integrity, leak scan) |
 | `scripts/package.sh` | Runs verification and builds a clean runtime-only `.zip` archive in `dist/` |
 | `.github/workflows/ci.yml` | GitHub Actions CI workflow running verification, packaging, and archive artifact upload |
+| `.github/workflows/release.yml` | GitHub Actions tag-triggered (`v*.*.*`) workflow verifying manifest version match and publishing GitHub Releases with `.zip` assets |
 | `.gitignore` | Git ignore rules for OS metadata, build artifacts (`dist/`, `*.zip`, `*.crx`, `*.pem`), dependencies, and editor files |
 
 ---
@@ -140,7 +148,7 @@ Requires **Node.js 20+** (no `npm install` or external packages needed):
 # Run syntax, manifest, 10-locale i18n, CSP/security, PNG, and leak checks
 node scripts/verify.mjs
 
-# Run all checks and build dist/antigravity-tab-status-v2.9.0.zip
+# Run all checks and build dist/antigravity-tab-status-v2.10.0.zip
 bash scripts/package.sh
 ```
 

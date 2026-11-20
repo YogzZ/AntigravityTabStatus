@@ -43,6 +43,7 @@ RUNTIME_FILES=(
   manifest.json
   background.js
   i18n.js
+  pricing.js
   page-bridge.js
   scanner.js
   content.js
@@ -115,4 +116,8 @@ process.stdout.write(String(count(process.argv[1])));
 ' "$STAGE_DIR")"
 
 SIZE_BYTES="$(wc -c < "$OUT_ZIP" | tr -d ' ')"
+if [ "$FILE_COUNT" -ne 26 ]; then
+  echo "Error: expected exactly 26 runtime files, got ${FILE_COUNT}" >&2
+  exit 1
+fi
 echo "Built $OUT_ZIP (${SIZE_BYTES} bytes, ${FILE_COUNT} runtime files)."

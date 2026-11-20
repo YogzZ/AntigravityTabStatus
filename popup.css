@@ -27,7 +27,8 @@
   }
 
   button,
-  input {
+  input,
+  select {
     font: inherit;
     color: inherit;
   }
@@ -343,8 +344,8 @@
     min-block-size: 0;
   }
 
-  [data-surface="sidepanel"] .main-content:has(.advanced-panel[open]) .projects-list {
-    max-block-size: 48dvh;
+  [data-surface="sidepanel"] .main-content:has(.usage-drawer[open], .advanced-panel[open]) .projects-list {
+    max-block-size: 42dvh;
   }
 
   [data-surface="sidepanel"] #openSidePanelBtn {
@@ -490,56 +491,255 @@
     white-space: nowrap;
   }
 
-  .instance-pills {
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: 0.3125rem;
-    overflow-x: auto;
-    scrollbar-width: none;
-    min-inline-size: 0;
+  .host-switcher {
+    position: relative;
     flex: 1 1 auto;
+    min-inline-size: 0;
   }
 
-  .instance-pills::-webkit-scrollbar {
-    display: none;
-  }
-
-  .instance-pill {
+  .host-select-trigger {
     display: inline-flex;
     align-items: center;
-    gap: 0.3125rem;
-    min-block-size: 26px;
-    max-inline-size: 9.5rem;
-    padding: 0.1875rem 0.5rem;
-    border-radius: var(--radius-pill);
+    gap: 0.375rem;
+    inline-size: 100%;
+    min-block-size: 28px;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-ctrl);
     border: 1px solid var(--card-border);
     background: var(--header-surface);
-    color: var(--text-muted);
-    font-size: 0.6875rem;
-    line-height: 1.2;
+    color: var(--text-main);
+    font-size: 0.71875rem;
+    font-weight: 500;
+    line-height: 1.25;
+    text-align: start;
     cursor: pointer;
-    flex: none;
-    white-space: nowrap;
+    min-inline-size: 0;
+    transition: border-color 0.14s ease, background-color 0.14s ease;
   }
 
-  .instance-pill:hover:not(.active) {
-    border-color: var(--control-border);
-    color: var(--text-main);
-  }
-
-  .instance-pill.active {
+  .host-select-trigger:hover,
+  .host-select-trigger[aria-expanded="true"],
+  .host-select-trigger:focus-visible {
     border-color: var(--accent);
-    background: color-mix(in oklab, var(--accent) 13%, var(--card-bg));
-    color: var(--text-main);
-    font-weight: 600;
-    box-shadow: inset 0 -2px 0 var(--accent);
+    background: color-mix(in oklab, var(--accent) 8%, var(--header-surface));
   }
 
-  .instance-pill-text {
+  .host-trigger-label {
+    flex: 1 1 auto;
+    min-inline-size: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .host-trigger-count {
+    flex: none;
+    padding: 0.0625rem 0.375rem;
+    border-radius: var(--radius-pill);
+    background: color-mix(in oklab, var(--text-muted) 14%, transparent);
+    color: var(--text-muted);
+    font-size: 0.625rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.35;
+  }
+
+  .host-trigger-chevron {
+    inline-size: 0.75rem;
+    block-size: 0.75rem;
+    flex: none;
+    background-color: currentColor;
+    color: var(--text-muted);
+    mask: var(--icon-chevron-down) no-repeat center / contain;
+    forced-color-adjust: none;
+    transition: transform 0.16s ease, color 0.14s ease;
+  }
+
+  .host-select-trigger[aria-expanded="true"] .host-trigger-chevron {
+    transform: rotate(180deg);
+    color: var(--accent-text);
+  }
+
+  .host-menu-popover {
+    padding: 0.25rem;
+    border-radius: var(--radius-card);
+    border: 1px solid var(--control-border);
+    background: var(--card-bg);
+    color: var(--text-main);
+    box-shadow:
+      0 10px 28px color-mix(in oklab, #000000 18%, transparent),
+      0 2px 8px color-mix(in oklab, #000000 10%, transparent);
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  @supports (position-area: block-end) {
+    .host-menu-popover {
+      inset: auto;
+      margin: 0;
+      margin-block-start: 0.25rem;
+      position-area: block-end span-inline-end;
+      position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+      min-inline-size: max(anchor-size(inline), 13.5rem);
+      max-inline-size: min(21rem, calc(100vw - 1.25rem));
+      max-block-size: min(19rem, calc(100dvh - 4rem));
+    }
+  }
+
+  @supports not (position-area: block-end) {
+    .host-menu-popover {
+      position: fixed;
+      inset: auto;
+      margin: 0;
+      max-block-size: min(19rem, calc(100dvh - 4rem));
+    }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .host-menu-popover {
+      opacity: 0;
+      transform: translateY(-3px) scale(0.985);
+      transition:
+        opacity 0.14s ease,
+        transform 0.14s ease,
+        display 0.14s allow-discrete,
+        overlay 0.14s allow-discrete;
+    }
+
+    .host-menu-popover:popover-open {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    @starting-style {
+      .host-menu-popover:popover-open {
+        opacity: 0;
+        transform: translateY(-3px) scale(0.985);
+      }
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .host-select-trigger,
+    .host-trigger-chevron {
+      transition: none;
+    }
+  }
+
+  .host-menu-list,
+  .host-menu-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-inline-size: 0;
+  }
+
+  .host-menu-sep {
+    border: 0;
+    border-block-start: 1px solid var(--card-border);
+    margin: 0.1875rem 0.25rem;
+  }
+
+  .host-menu-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.1875rem;
+    min-inline-size: 0;
+  }
+
+  .host-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    flex: 1 1 auto;
+    min-inline-size: 0;
+    min-block-size: 30px;
+    padding: 0.25rem 0.5rem;
+    border: 0;
+    border-radius: calc(var(--radius-ctrl) - 1px);
+    background: transparent;
+    color: var(--text-main);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.25;
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .host-menu-item::before {
+    content: "";
+    inline-size: 0.875rem;
+    flex: none;
+    text-align: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--accent-text);
+  }
+
+  .host-menu-item[aria-checked="true"]::before {
+    content: "✓";
+  }
+
+  .host-menu-item[aria-checked="true"] {
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    font-weight: 600;
+  }
+
+  .host-menu-item:hover {
+    background: color-mix(in oklab, var(--accent) 14%, transparent);
+  }
+
+  .host-menu-item:focus-visible {
+    background: color-mix(in oklab, var(--accent) 15%, transparent);
+    outline: none;
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+
+  .host-menu-label {
+    flex: 1 1 auto;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .host-menu-open-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    min-inline-size: 28px;
+    min-block-size: 30px;
+    padding-inline: 0.375rem;
+    border: 1px solid transparent;
+    border-radius: calc(var(--radius-ctrl) - 1px);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .host-menu-open-btn .jump-glyph {
+    inline-size: 0.6875rem;
+    block-size: 0.6875rem;
+  }
+
+  .host-menu-open-btn:hover,
+  .host-menu-open-btn:focus-visible {
+    background: color-mix(in oklab, var(--accent) 14%, transparent);
+    border-color: color-mix(in oklab, var(--accent) 42%, transparent);
+    color: var(--accent-text);
+  }
+
+  @media (pointer: coarse) {
+    .host-select-trigger,
+    .host-menu-item {
+      min-block-size: 2.75rem;
+    }
+
+    .host-menu-open-btn {
+      min-inline-size: 2.75rem;
+      min-block-size: 2.75rem;
+    }
   }
 
   .instance-mini-dot {
@@ -562,11 +762,25 @@
     background: var(--running);
   }
 
+  .instance-mini-dot.remote-online {
+    background: var(--unread);
+  }
+
+  .instance-mini-dot.remote-offline {
+    background: var(--idle);
+    opacity: 0.55;
+  }
+
+  .instance-mini-dot.remote-special {
+    background: var(--accent);
+    opacity: 0.78;
+  }
+
   .instance-jump-btn {
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    min-block-size: 26px;
+    min-block-size: 28px;
     padding: 0.1875rem 0.5rem;
     border-radius: var(--radius-ctrl);
     border: 1px solid color-mix(in oklab, var(--accent) 42%, var(--card-border));
@@ -595,11 +809,47 @@
   }
 
   @media (forced-colors: active) {
-    .instance-pill.active {
+    .host-select-trigger {
+      background: ButtonFace;
+      color: ButtonText;
+      border-color: ButtonText;
+    }
+
+    .host-select-trigger:hover,
+    .host-select-trigger[aria-expanded="true"],
+    .host-select-trigger:focus-visible {
+      border-color: Highlight;
+    }
+
+    .host-menu-popover {
+      background: Canvas;
+      color: CanvasText;
+      border-color: CanvasText;
+    }
+
+    .host-menu-sep {
+      border-block-start-color: GrayText;
+    }
+
+    .host-menu-item {
+      color: CanvasText;
+    }
+
+    .host-menu-item[aria-checked="true"],
+    .host-menu-item:hover,
+    .host-menu-item:focus-visible {
       background: Highlight;
       color: HighlightText;
-      border-color: Highlight;
+    }
+
+    .host-menu-item:focus-visible {
       box-shadow: none;
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
+
+    .host-menu-item[aria-checked="true"]::before {
+      color: HighlightText;
     }
 
     .instance-mini-dot {
@@ -607,8 +857,28 @@
       background: CanvasText;
     }
 
-    .instance-pill.active .instance-mini-dot {
+    .host-menu-item[aria-checked="true"] .instance-mini-dot,
+    .host-menu-item:hover .instance-mini-dot,
+    .host-menu-item:focus-visible .instance-mini-dot {
       background: HighlightText;
+    }
+
+    .instance-mini-dot.remote-online,
+    .instance-mini-dot.remote-offline,
+    .instance-mini-dot.remote-special {
+      background: CanvasText;
+    }
+
+    .host-menu-open-btn {
+      border-color: ButtonText;
+      color: ButtonText;
+      background: ButtonFace;
+    }
+
+    .host-menu-open-btn:hover,
+    .host-menu-open-btn:focus-visible {
+      border-color: Highlight;
+      color: Highlight;
     }
 
     .instance-jump-btn {
@@ -1264,7 +1534,7 @@
     padding-block-start: 0.5rem;
     border-block-start: 1px solid color-mix(in oklab, var(--text-muted) 14%, transparent);
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(13.25rem, 1fr));
     gap: 0.4375rem 0.625rem;
   }
 
@@ -1278,13 +1548,22 @@
 
   .quota-head {
     display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
+    flex-wrap: nowrap;
+    align-items: center;
     justify-content: space-between;
-    gap: 0.125rem 0.375rem;
+    gap: 0.3125rem;
     min-inline-size: 0;
     font-size: 0.6875rem;
     line-height: 1.3;
+  }
+
+  .quota-title-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28125rem;
+    min-inline-size: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
   }
 
   .quota-label {
@@ -1296,12 +1575,50 @@
     min-inline-size: 0;
   }
 
+  .quota-pace-badge {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.59375rem;
+    font-weight: 600;
+    line-height: 1.2;
+    padding: 0.0625rem 0.3125rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--card-border);
+    background: var(--card-sub);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .quota-pace-badge.is-comfortable,
+  .quota-pace-badge.is-spare {
+    background: color-mix(in oklab, var(--health-ok) 15%, transparent);
+    border-color: color-mix(in oklab, var(--health-ok) 38%, transparent);
+    color: var(--health-ok-text);
+  }
+
+  .quota-pace-badge.is-warn {
+    background: color-mix(in oklab, var(--health-warn) 16%, transparent);
+    border-color: color-mix(in oklab, var(--health-warn) 42%, transparent);
+    color: var(--health-warn-text);
+  }
+
+  .quota-pace-badge.is-fast {
+    background: color-mix(in oklab, var(--health-danger) 16%, transparent);
+    border-color: color-mix(in oklab, var(--health-danger) 42%, transparent);
+    color: var(--health-danger-text);
+  }
+
   .quota-meta {
     font-size: 0.65625rem;
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-    flex-shrink: 0;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 0 1 auto;
   }
 
   .quota-meta.is-warn {
@@ -1362,6 +1679,20 @@
   @media (forced-colors: active) {
     .quota-meta.is-warn,
     .quota-meta.is-danger {
+      color: Highlight;
+    }
+
+    .quota-pace-badge {
+      forced-color-adjust: none;
+      background: Canvas;
+      color: CanvasText;
+      border-color: CanvasText;
+    }
+
+    .quota-pace-badge.is-fast,
+    .quota-pace-badge.is-warn,
+    .quota-pace-badge.is-spare {
+      border-color: Highlight;
       color: Highlight;
     }
 
@@ -1901,7 +2232,8 @@
 
   .ctx-chip,
   .speed-chip,
-  .compact-chip {
+  .compact-chip,
+  .cache-chip {
     display: inline-flex;
     align-items: center;
     font-size: 0.625rem;
@@ -1945,12 +2277,32 @@
     color: var(--health-warn-text);
   }
 
+  .cache-chip.is-warm {
+    background: color-mix(in oklab, var(--health-ok) 13%, transparent);
+    border-color: color-mix(in oklab, var(--health-ok) 32%, transparent);
+    color: var(--health-ok-text);
+  }
+
+  .cache-chip.is-cooling {
+    background: color-mix(in oklab, var(--health-warn) 18%, transparent);
+    border-color: color-mix(in oklab, var(--health-warn) 44%, transparent);
+    color: var(--health-warn-text);
+  }
+
+  .cache-chip.is-cold {
+    background: var(--header-surface);
+    border-color: var(--card-border);
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
   @media (forced-colors: active) {
     .ctx-chip,
     .ctx-chip.warn,
     .ctx-chip.danger,
     .speed-chip,
-    .compact-chip {
+    .compact-chip,
+    .cache-chip {
       forced-color-adjust: none;
       background: Canvas;
       color: CanvasText;
@@ -1958,9 +2310,15 @@
     }
 
     .ctx-chip.danger,
-    .compact-chip {
+    .compact-chip,
+    .cache-chip.is-cooling {
       border-color: Highlight;
       color: Highlight;
+    }
+
+    .cache-chip.is-cold {
+      border-color: GrayText;
+      color: GrayText;
     }
   }
 
@@ -2025,20 +2383,24 @@
   /* ==========================================================================
      原生动画折叠面板（details::details-content + CSS Masked Chevron）
      ========================================================================== */
+  .usage-drawer,
   .advanced-panel {
     padding: 0.5625rem 0.75rem;
   }
 
+  .usage-drawer::details-content,
   .advanced-panel::details-content {
     overflow: clip;
     contain: layout;
   }
 
+  .usage-drawer:not([open])::details-content,
   .advanced-panel:not([open])::details-content {
     block-size: 0;
   }
 
   @media (prefers-reduced-motion: no-preference) {
+    .usage-drawer::details-content,
     .advanced-panel::details-content {
       transition: block-size, content-visibility, display;
       transition-duration: var(--dur-panel);
@@ -2075,6 +2437,7 @@
     forced-color-adjust: none;
   }
 
+  .usage-drawer[open] > .usage-summary::before,
   .advanced-panel[open] > .advanced-summary::before {
     rotate: 0deg;
   }
@@ -2517,13 +2880,633 @@
     font-weight: 500;
   }
 
+  /* ==========================================================================
+     Token 用量与成本分析折叠抽屉 (P1)
+     ========================================================================== */
+  .usage-summary-pill {
+    font-size: 0.65625rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    padding: 0.0625rem 0.4375rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--card-border);
+    background: var(--header-surface);
+    color: var(--text-main);
+    white-space: nowrap;
+    flex: none;
+  }
+
+  .usage-body {
+    padding-block-start: 0.625rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5625rem;
+  }
+
+  .usage-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.375rem;
+  }
+
+  .usage-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.375rem;
+  }
+
+  .usage-kpi-card {
+    background: var(--card-sub);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-inner);
+    padding: 0.4375rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-inline-size: 0;
+  }
+
+  .usage-kpi-label {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    overflow-wrap: break-word;
+  }
+
+  .usage-kpi-val {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-main);
+    overflow-wrap: anywhere;
+  }
+
+  .usage-kpi-sub {
+    font-size: 0.625rem;
+    line-height: 1.25;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: break-word;
+  }
+
+  .usage-viz-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.4375rem;
+  }
+
+  .usage-viz-box {
+    background: var(--card-sub);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-inner);
+    padding: 0.4375rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3125rem;
+    min-inline-size: 0;
+  }
+
+  .usage-subhead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.375rem;
+    min-inline-size: 0;
+  }
+
+  .usage-subtitle {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-main);
+    overflow-wrap: break-word;
+  }
+
+  .usage-submeta {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .usage-trend-wrap {
+    inline-size: 100%;
+    min-block-size: 52px;
+  }
+
+  .trend-svg {
+    display: block;
+    inline-size: 100%;
+    block-size: 52px;
+    overflow: visible;
+  }
+
+  .trend-bar {
+    fill: var(--accent);
+  }
+
+  .trend-bar.is-empty {
+    fill: color-mix(in oklab, var(--text-muted) 22%, transparent);
+  }
+
+  .trend-bar.is-peak {
+    fill: var(--health-ok);
+  }
+
+  .usage-heatmap-grid {
+    display: grid;
+    grid-template-columns: repeat(14, minmax(0, 1fr));
+    gap: 3px;
+  }
+
+  .heatmap-cell {
+    aspect-ratio: 1;
+    min-block-size: 10px;
+    border-radius: 3px;
+    background: var(--card-sub);
+    border: 1px solid var(--card-border);
+  }
+
+  .heatmap-cell[data-level="1"] {
+    background: color-mix(in oklab, var(--health-ok) 24%, var(--card-sub));
+    border-color: color-mix(in oklab, var(--health-ok) 34%, var(--card-border));
+  }
+
+  .heatmap-cell[data-level="2"] {
+    background: color-mix(in oklab, var(--health-ok) 46%, var(--card-sub));
+    border-color: color-mix(in oklab, var(--health-ok) 56%, var(--card-border));
+  }
+
+  .heatmap-cell[data-level="3"] {
+    background: color-mix(in oklab, var(--health-ok) 70%, var(--card-sub));
+    border-color: color-mix(in oklab, var(--health-ok) 76%, var(--card-border));
+  }
+
+  .heatmap-cell[data-level="4"] {
+    background: var(--health-ok);
+    border-color: var(--health-ok);
+  }
+
+  .usage-empty-note {
+    padding: 0.5rem 0.625rem;
+    border-radius: var(--radius-inner);
+    border: 1px dashed var(--card-border);
+    background: var(--card-sub);
+    color: var(--text-muted);
+    font-size: 0.6875rem;
+    text-align: center;
+    overflow-wrap: break-word;
+  }
+
+  .usage-rank-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+  }
+
+  .usage-rank-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3125rem;
+    min-inline-size: 0;
+  }
+
+  .usage-rank-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3125rem;
+  }
+
+  .usage-rank-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-inline-size: 0;
+  }
+
+  .rank-item-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.375rem;
+    min-inline-size: 0;
+  }
+
+  .rank-item-name {
+    font-size: 0.6875rem;
+    color: var(--text-main);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-inline-size: 0;
+    flex: 1 1 auto;
+  }
+
+  .rank-item-val {
+    font-size: 0.65625rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex: none;
+  }
+
+  .rank-bar-track {
+    inline-size: 100%;
+    block-size: 4px;
+    border-radius: var(--radius-pill);
+    background: var(--header-surface);
+    overflow: hidden;
+  }
+
+  .rank-bar-fill {
+    block-size: 100%;
+    border-radius: var(--radius-pill);
+    background: var(--health-ok);
+    transition: inline-size 0.2s ease;
+  }
+
+  .usage-rates-subpanel {
+    background: var(--card-sub);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-inner);
+    padding: 0.375rem 0.5rem;
+  }
+
+  /* Magpie CLI Gateway (Read-Only) Card & Controls (P2) */
+  .magpie-live-card {
+    background: var(--card-sub);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-inner);
+    padding: 0.4375rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    min-inline-size: 0;
+  }
+
+  .magpie-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.375rem;
+    min-inline-size: 0;
+  }
+
+  .magpie-head-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3125rem;
+    flex: none;
+  }
+
+  .magpie-status-pill {
+    font-size: 0.625rem;
+    font-weight: 600;
+    line-height: 1.25;
+    padding: 0.0625rem 0.375rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--card-border);
+    background: var(--header-surface);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .magpie-status-pill.is-online {
+    background: color-mix(in oklab, var(--health-ok) 15%, transparent);
+    border-color: color-mix(in oklab, var(--health-ok) 40%, transparent);
+    color: var(--health-ok-text);
+  }
+
+  .magpie-status-pill.is-offline {
+    background: var(--header-surface);
+    border-color: var(--card-border);
+    color: var(--text-muted);
+  }
+
+  .magpie-refresh-btn {
+    inline-size: 22px;
+    block-size: 22px;
+    padding: 0;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .magpie-refresh-btn.is-syncing .sync-glyph {
+      animation: spin 0.9s linear infinite;
+    }
+  }
+
+  .magpie-summary-line {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: break-word;
+  }
+
+  .magpie-offline-note {
+    font-size: 0.65625rem;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  .magpie-quotas-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-inline-size: 0;
+  }
+
+  .magpie-quota-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .magpie-quota-pill {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.625rem;
+    font-weight: 600;
+    line-height: 1.25;
+    padding: 0.09375rem 0.375rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in oklab, var(--health-ok) 36%, transparent);
+    background: color-mix(in oklab, var(--health-ok) 13%, transparent);
+    color: var(--health-ok-text);
+    font-variant-numeric: tabular-nums;
+    max-inline-size: 100%;
+    overflow-wrap: break-word;
+  }
+
+  .magpie-quota-pill.is-warn {
+    background: color-mix(in oklab, var(--health-warn) 17%, transparent);
+    border-color: color-mix(in oklab, var(--health-warn) 42%, transparent);
+    color: var(--health-warn-text);
+  }
+
+  .magpie-quota-pill.is-danger {
+    background: color-mix(in oklab, var(--health-danger) 17%, transparent);
+    border-color: color-mix(in oklab, var(--health-danger) 42%, transparent);
+    color: var(--health-danger-text);
+  }
+
+  .magpie-url-input {
+    margin-block-start: 0;
+  }
+
+  .usage-rates-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5ch;
+    min-block-size: 24px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+
+  .usage-rates-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .usage-rates-summary::before {
+    content: "";
+    inline-size: 0.875em;
+    block-size: 0.875em;
+    flex: none;
+    background-color: currentColor;
+    mask: var(--icon-chevron-down) no-repeat center / contain;
+    rotate: -90deg;
+    forced-color-adjust: none;
+  }
+
+  .usage-rates-subpanel[open] > .usage-rates-summary::before {
+    rotate: 0deg;
+  }
+
+  .usage-rates-body {
+    padding-block-start: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4375rem;
+  }
+
+  .rate-select,
+  .rate-custom-input,
+  .rate-num-input {
+    inline-size: 100%;
+    min-block-size: 26px;
+    padding: 0.1875rem 0.4375rem;
+    border-radius: var(--radius-ctrl);
+    border: 1px solid var(--control-border);
+    background: var(--card-bg);
+    color: var(--text-main);
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .rate-custom-input {
+    margin-block-start: 0.3125rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .rate-num-input.fx-input {
+    inline-size: 5.25rem;
+    text-align: end;
+  }
+
+  .rate-fields-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.3125rem;
+  }
+
+  .rate-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-inline-size: 0;
+  }
+
+  .rate-field label {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    overflow-wrap: break-word;
+  }
+
+  .override-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .override-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.375rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in oklab, var(--accent) 36%, var(--card-border));
+    background: color-mix(in oklab, var(--accent) 10%, transparent);
+    color: var(--text-main);
+    font-size: 0.625rem;
+    max-inline-size: 100%;
+  }
+
+  .override-chip-remove {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 0.125rem;
+    line-height: 1;
+    font-weight: 700;
+  }
+
+  .override-chip-remove:hover {
+    color: var(--waiting-urgent);
+  }
+
+  .usage-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.375rem 0.5rem;
+  }
+
+  .usage-export-group,
+  .usage-clear-area {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  .danger-ghost-btn {
+    border-color: color-mix(in oklab, var(--health-danger) 42%, var(--control-border));
+    color: var(--health-danger-text);
+  }
+
+  .danger-ghost-btn:hover {
+    border-color: var(--waiting-urgent);
+    background: color-mix(in oklab, var(--health-danger) 12%, transparent);
+  }
+
+  .clear-confirm-wrap {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3125rem;
+  }
+
+  .clear-confirm-text {
+    font-size: 0.6875rem;
+    color: var(--health-danger-text);
+    font-weight: 600;
+  }
+
+  .danger-btn {
+    min-block-size: 26px;
+    padding: 0.25rem 0.5625rem;
+    border-radius: var(--radius-ctrl);
+    border: 1px solid var(--waiting-urgent);
+    background: var(--waiting-urgent);
+    color: #ffffff;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .danger-btn:hover {
+    filter: brightness(0.92);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rank-bar-fill,
+    .usage-drawer::details-content,
+    .advanced-panel::details-content,
+    .usage-summary::before,
+    .advanced-summary::before {
+      transition: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .usage-summary-pill,
+    .usage-kpi-card,
+    .usage-viz-box,
+    .usage-rates-subpanel,
+    .usage-empty-note,
+    .magpie-live-card,
+    .magpie-status-pill,
+    .magpie-quota-pill {
+      background: Canvas;
+      color: CanvasText;
+      border-color: CanvasText;
+    }
+
+    .magpie-status-pill.is-online,
+    .magpie-quota-pill.is-warn,
+    .magpie-quota-pill.is-danger {
+      border-color: Highlight;
+      color: Highlight;
+    }
+
+    .magpie-status-pill.is-offline {
+      border-color: GrayText;
+      color: GrayText;
+    }
+
+    .trend-bar {
+      fill: Highlight;
+    }
+
+    .trend-bar.is-empty {
+      fill: Canvas;
+      stroke: GrayText;
+    }
+
+    .heatmap-cell {
+      forced-color-adjust: none;
+      background: Canvas;
+      border: 1px solid GrayText;
+    }
+
+    .heatmap-cell:not([data-level="0"]) {
+      background: Highlight;
+      border-color: CanvasText;
+    }
+
+    .rank-bar-track {
+      background: Canvas;
+      border: 1px solid CanvasText;
+    }
+
+    .rank-bar-fill {
+      forced-color-adjust: none;
+      background: Highlight;
+    }
+
+    .danger-btn {
+      background: Highlight;
+      color: HighlightText;
+      border-color: Highlight;
+    }
+  }
+
   @container panel (inline-size >= 440px) {
     .style-grid {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .quota-strip {
-      grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(13.25rem, 1fr));
       gap: 0.5rem 0.75rem;
     }
 
@@ -2534,9 +3517,30 @@
 
     .ctx-chip,
     .speed-chip,
-    .compact-chip {
+    .compact-chip,
+    .cache-chip {
       font-size: 0.65625rem;
       padding: 0.09375rem 0.4375rem;
+    }
+  }
+
+  @container panel (inline-size >= 460px) {
+    .usage-viz-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .usage-rank-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @container panel (inline-size >= 520px) {
+    .usage-kpi-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .rate-fields-grid {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
     }
   }
 
@@ -2555,6 +3559,14 @@
 
     .task-telemetry-row {
       padding-inline-start: 0.5625rem;
+    }
+
+    .usage-kpi-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .rate-fields-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 }

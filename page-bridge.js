@@ -147,6 +147,7 @@
   let lastBridgeCacheTs = 0;
   let lastBridgeNamesKey = '';
   let lastBridgeResultJson = '';
+  let lastBridgeHostPath = '';
   let netDataDirty = false;
 
   function formatRelativeTime(rawTs) {
@@ -777,7 +778,8 @@
       obj.subject ??
       obj.displayName ??
       obj.conversationTitle ??
-      obj.name;
+      obj.name ??
+      obj.annotations?.title;
     if (typeof title !== 'string') return false;
     const cleanTitle = title.replace(/\s+/g, ' ').trim();
     if (!cleanTitle || cleanTitle.length > 200 || NAV_SKIP_RE.test(cleanTitle)) return false;
@@ -912,7 +914,8 @@
         obj.subject ??
         obj.displayName ??
         obj.conversationTitle ??
-        obj.name
+        obj.name ??
+        obj.annotations?.title
     )
       .replace(/\s+/g, ' ')
       .trim();
@@ -920,6 +923,8 @@
     const projId = String(
       obj.projectId ??
         obj.workspaceId ??
+        obj.trajectoryMetadata?.projectId ??
+        obj.metadata?.projectId ??
         (typeof obj.project === 'string' ? obj.project : obj.project?.id) ??
         fallbackProjectId ??
         ''
@@ -962,6 +967,11 @@
         obj.updatedAt ?? obj.lastModifiedTime ?? obj.lastActivityAt ?? obj.modifiedAt ?? obj.createdAt
       );
     const href = typeof obj.href === 'string' ? obj.href : typeof obj.url === 'string' ? obj.url : '';
+    const summaryStepCount =
+      typeof obj.stepCount === 'number' && Number.isFinite(obj.stepCount) ? obj.stepCount : null;
+    const hasWaitingStepsField = Array.isArray(obj.waitingSteps);
+    const hasExplicitEmptyWaitingSteps =
+      Array.isArray(obj.waitingSteps) && obj.waitingSteps.length === 0;
 
     return {
       convId: idStr,
@@ -977,10 +987,13 @@
       isDetailRecord: Boolean(isDetailRecord),
       isTerminal: Boolean(isTerminal),
       debugFields: debugFields || {},
-      // 对话推进指纹：提问后用户一旦回答，steps/messages 数量一定增长；缓存里的旧快照
-      // 数量不会变。mergeConvRecord 靠它判断一个 running 详情是不是提问前的旧快照。
+      // 对话推进指纹：提问后用户一旦回答，steps/messages/stepCount 增长；缓存里的旧快照
+      // 数量不会变。mergeConvRecord 靠它判断一个 running 快照是否已跨过 waiting。
       stepsCount: Array.isArray(obj.steps) ? obj.steps.length : null,
       messagesCount: Array.isArray(obj.messages) ? obj.messages.length : null,
+      summaryStepCount,
+      hasWaitingStepsField,
+      hasExplicitEmptyWaitingSteps,
       timeText: typeof rawTime === 'string' ? rawTime : '',
       href
     };
@@ -1026,7 +1039,7 @@
     return out;
   }
 
-  // 对话在 waiting 之后是否真正推进过：只有 steps/messages 数量比记录 waiting 时增长了，
+  // 对话在 waiting 之后是否真正推进过：只有 steps/messages/stepCount 数量比记录 waiting 时增长了，
   // 才说明提问已被回答、会话重新开跑。缓存里的旧快照数量不会增长，不能据此清除 waiting。
   function hasProgressedBeyondWaiting(prev, next) {
     const stepsGrew =
@@ -1037,7 +1050,11 @@
       typeof next.messagesCount === 'number' &&
       typeof prev.waitingMessages === 'number' &&
       next.messagesCount > prev.waitingMessages;
-    return stepsGrew || messagesGrew;
+    const summaryStepGrew =
+      typeof next.summaryStepCount === 'number' &&
+      typeof prev.waitingSummarySteps === 'number' &&
+      next.summaryStepCount > prev.waitingSummarySteps;
+    return stepsGrew || messagesGrew || summaryStepGrew;
   }
 
   function mergeConvRecord(prev, next, { preferLatestExplicit = false } = {}) {
@@ -1049,6 +1066,9 @@
       if (next.state === 'waiting') {
         if (typeof next.stepsCount === 'number') rec.waitingSteps = next.stepsCount;
         if (typeof next.messagesCount === 'number') rec.waitingMessages = next.messagesCount;
+        if (typeof next.summaryStepCount === 'number') {
+          rec.waitingSummarySteps = next.summaryStepCount;
+        }
       }
       return rec;
     }
@@ -1056,10 +1076,13 @@
     let takeNextState = false;
 
     if (prev.state === 'waiting' && next.state === 'running') {
-      // waiting 是粘性的：粗粒度列表摘要与提问前缓存的旧详情快照都不得降级 waiting，
-      // 只有 steps/messages 数量真正增长后的详情 running 才能清除 waiting。
+      // waiting 是粘性的：缺乏 waitingSteps 字段的粗粒度摘要与提问前缓存的旧快照不得降级 waiting，
+      // 但明确携带 waitingSteps: [] 的实时摘要，或步骤数已增长且为详情/权威摘要的 running 应立即切回 running。
       takeNextState = Boolean(
-        preferLatestExplicit && next.isDetailRecord && hasProgressedBeyondWaiting(prev, next)
+        preferLatestExplicit &&
+          (next.hasExplicitEmptyWaitingSteps ||
+            ((next.isDetailRecord || next.hasWaitingStepsField) &&
+              hasProgressedBeyondWaiting(prev, next)))
       );
     } else if (prev.state === 'waiting' && (next.state === 'idle' || next.state === 'unread')) {
       // 终态（IDLE / DONE / COMPLETED）或未读、或详情显式回到 idle 才清除 waiting
@@ -1095,16 +1118,27 @@
     };
     const stepsCount = pickCount('stepsCount');
     const messagesCount = pickCount('messagesCount');
+    const summaryStepCount =
+      typeof next.summaryStepCount === 'number'
+        ? next.summaryStepCount
+        : typeof prev.summaryStepCount === 'number'
+          ? prev.summaryStepCount
+          : null;
 
     let waitingSteps = takeNextState ? (next.waitingSteps ?? prev.waitingSteps) : prev.waitingSteps;
     let waitingMessages = takeNextState ? (next.waitingMessages ?? prev.waitingMessages) : prev.waitingMessages;
+    let waitingSummarySteps = takeNextState
+      ? (next.waitingSummarySteps ?? prev.waitingSummarySteps)
+      : prev.waitingSummarySteps;
     if (resultState === 'waiting') {
       const src = takeNextState ? next : prev;
       if (typeof src.stepsCount === 'number') waitingSteps = src.stepsCount;
       if (typeof src.messagesCount === 'number') waitingMessages = src.messagesCount;
+      if (typeof src.summaryStepCount === 'number') waitingSummarySteps = src.summaryStepCount;
     } else if (prev.state === 'waiting' && takeNextState) {
       waitingSteps = undefined;
       waitingMessages = undefined;
+      waitingSummarySteps = undefined;
     }
 
     return {
@@ -1127,8 +1161,14 @@
       isTerminal: Boolean(takeNextState ? next.isTerminal : prev.isTerminal),
       stepsCount,
       messagesCount,
+      summaryStepCount,
+      hasWaitingStepsField: Boolean(prev.hasWaitingStepsField || next.hasWaitingStepsField),
+      hasExplicitEmptyWaitingSteps:
+        resultState === 'running' &&
+        Boolean(takeNextState ? next.hasExplicitEmptyWaitingSteps : prev.hasExplicitEmptyWaitingSteps),
       waitingSteps,
       waitingMessages,
+      waitingSummarySteps,
       debugFields: mergeDebugFields(
         prev.debugFields,
         next.debugFields,
@@ -1286,11 +1326,19 @@
             outConvs.set(key, mergeConvRecord(prev, conv));
             return;
           }
+          if (
+            val.$typeName === 'exa.jetski_cortex_pb.CascadeTrajectorySummary' ||
+            ('trajectoryMetadata' in val && 'stepCount' in val && 'workspaces' in val)
+          ) {
+            return;
+          }
         } catch {}
 
         // 遍历普通对象键值
         const keys = Object.keys(val);
-        for (let i = 0; i < keys.length && i < 65; i++) {
+        const maxKeys =
+          parentKey === 'summaries' || parentKey === 'trajectorySummaries' ? 200 : 65;
+        for (let i = 0; i < keys.length && i < maxKeys; i++) {
           const k = keys[i];
           if (
             k.startsWith('_') ||
@@ -1336,6 +1384,7 @@
   // ============================================================================
   const MAX_TELEMETRY_CONVS = 40;
   const MAX_STEPS_PER_CONV = 240;
+  const MAX_PRICED_STEP_LOG = 512;
   const MAX_MODELS_CACHE = 80;
   const LS_ENDPOINT_MARKER = '/exa.language_server_pb.LanguageServerService/';
   const URL_CONV_ID_RE =
@@ -1343,6 +1392,17 @@
   const SHADOW_MODEL_RE =
     /(?:^|[^A-Z0-9])(M50|M21)(?:$|[^A-Z0-9])|FLASH[_-]?LITE|IMAGE|BANANA/i;
   const SENTINEL_CUTOFF_MS = Date.UTC(2000, 0, 1);
+
+  const QUOTA_WINDOW_MS = 5 * 60 * 60 * 1000;
+  const QUOTA_PRE_RESET_WINDOW_MS = 30 * 60 * 1000;
+  const QUOTA_PRE_RESET_MIN_FRAC = 0.4;
+  const QUOTA_HISTORY_MAX_AGE_MS = 30 * 60 * 1000;
+  const QUOTA_HISTORY_MAX_SAMPLES = 36;
+  const QUOTA_MIN_SLOPE_SPAN_MS = 60 * 1000;
+  const QUOTA_MIN_SLOPE_DROP_FRAC = 0.01;
+  const QUOTA_STALE_IDLE_MS = 15 * 60 * 1000;
+  const READ_ONLY_POLL_ENDPOINT_RE =
+    /(?:GetUserStatus|GetAllCascadeTrajectories|GetCascadeTrajectorySteps|GetCascadeTrajectory)\b/i;
 
   const RPC_USER_STATUS_TTL_MS = 30000;
   const RPC_TRAJECTORIES_TTL_MS = 4000;
@@ -1413,6 +1473,7 @@
   const netModelsById = new Map();
   const netModelIdByNumValue = new Map();
   const convTelemetryById = new Map();
+  const quotaHistoryByPool = { gemini: [], premium: [] };
   const composerFallbackIds = new WeakMap();
   let composerFallbackSeq = 0;
   let lastKnownActiveConvId = '';
@@ -1646,12 +1707,24 @@
     };
   }
 
-  function upsertModelConfig(info) {
+  function upsertModelConfig(info, source = 'network') {
     if (!info || !info.modelId || isShadowModel(info.modelId, info.label)) return false;
     if (info.numericId) {
       netModelIdByNumValue.set(info.numericId, info.modelId);
     }
     const prev = netModelsById.get(info.modelId);
+    const observedNow = Date.now();
+    const isPassiveFiber = source === 'fiber';
+    const quotaChanged =
+      info.hasQuotaInfo &&
+      (!prev ||
+        prev.remainingFraction !== info.remainingFraction ||
+        prev.resetTimeMs !== info.resetTimeMs);
+    const nextQuotaObservedAt = info.hasQuotaInfo
+      ? isPassiveFiber && prev?.quotaObservedAt != null && !quotaChanged
+        ? prev.quotaObservedAt
+        : observedNow
+      : prev?.quotaObservedAt ?? null;
     const next = {
       modelId: info.modelId,
       label:
@@ -1668,7 +1741,8 @@
       remainingFraction: info.hasQuotaInfo
         ? info.remainingFraction
         : prev?.remainingFraction ?? null,
-      resetTimeMs: info.hasQuotaInfo ? info.resetTimeMs : prev?.resetTimeMs ?? null
+      resetTimeMs: info.hasQuotaInfo ? info.resetTimeMs : prev?.resetTimeMs ?? null,
+      quotaObservedAt: nextQuotaObservedAt
     };
     const changed =
       !prev ||
@@ -1795,7 +1869,11 @@
             inputTokens: 0,
             cacheReadTokens: 0,
             cacheCreationTokens: 0,
-            outputTokens: 0
+            cacheWrite5mTokens: 0,
+            cacheWrite1hTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: 0,
+            reasoningInOutput: false
           }
         : null;
     }
@@ -1817,13 +1895,44 @@
         rawMu.cacheReadInputTokens ??
         rawMu.cache_read_input_tokens
     );
-    const cacheCreationTokens = toNonNegInt(
+    const rawCacheObj =
+      (rawMu.cache_creation && typeof rawMu.cache_creation === 'object'
+        ? rawMu.cache_creation
+        : null) ||
+      (rawMu.cacheCreation && typeof rawMu.cacheCreation === 'object'
+        ? rawMu.cacheCreation
+        : null);
+    const flatCacheCreationTokens = toNonNegInt(
       rawMu.cacheCreationTokens ??
         rawMu.cache_creation_tokens ??
         rawMu.cacheCreationInputTokens ??
         rawMu.cache_creation_input_tokens ??
         rawMu.cacheWriteTokens ??
         rawMu.cache_write_tokens
+    );
+    const cacheWrite5mTokens = toNonNegInt(
+      rawMu.cacheWrite5mTokens ??
+        rawMu.cache_write_5m_tokens ??
+        rawMu.ephemeral5mInputTokens ??
+        rawMu.ephemeral_5m_input_tokens ??
+        rawCacheObj?.ephemeral5mInputTokens ??
+        rawCacheObj?.ephemeral_5m_input_tokens ??
+        rawCacheObj?.cacheWrite5mTokens ??
+        rawCacheObj?.cache_write_5m_tokens
+    );
+    const cacheWrite1hTokens = toNonNegInt(
+      rawMu.cacheWrite1hTokens ??
+        rawMu.cache_write_1h_tokens ??
+        rawMu.ephemeral1hInputTokens ??
+        rawMu.ephemeral_1h_input_tokens ??
+        rawCacheObj?.ephemeral1hInputTokens ??
+        rawCacheObj?.ephemeral_1h_input_tokens ??
+        rawCacheObj?.cacheWrite1hTokens ??
+        rawCacheObj?.cache_write_1h_tokens
+    );
+    const cacheCreationTokens = Math.max(
+      flatCacheCreationTokens,
+      cacheWrite5mTokens + cacheWrite1hTokens
     );
     const outputTokens = toNonNegInt(
       rawMu.outputTokens ??
@@ -1833,7 +1942,28 @@
         rawMu.completionTokens ??
         rawMu.completion_tokens
     );
-    if (!model && inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens === 0) {
+    const directReasoningRaw =
+      rawMu.reasoningTokens ??
+      rawMu.reasoning_tokens ??
+      rawMu.thoughtsTokenCount ??
+      rawMu.thoughts_token_count ??
+      rawMu.thinkingTokens ??
+      rawMu.thinking_tokens;
+    const nestedReasoningRaw =
+      rawMu.completionTokensDetails?.reasoningTokens ??
+      rawMu.completion_tokens_details?.reasoning_tokens ??
+      rawMu.outputTokensDetails?.reasoningTokens ??
+      rawMu.output_tokens_details?.reasoning_tokens;
+    const reasoningTokens = toNonNegInt(directReasoningRaw ?? nestedReasoningRaw);
+    const reasoningInOutput =
+      directReasoningRaw === undefined &&
+      nestedReasoningRaw !== undefined &&
+      reasoningTokens > 0 &&
+      outputTokens >= reasoningTokens;
+    if (
+      !model &&
+      inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens + reasoningTokens === 0
+    ) {
       return null;
     }
     return {
@@ -1841,8 +1971,40 @@
       inputTokens,
       cacheReadTokens,
       cacheCreationTokens,
-      outputTokens
+      cacheWrite5mTokens,
+      cacheWrite1hTokens,
+      outputTokens,
+      reasoningTokens,
+      reasoningInOutput
     };
+  }
+
+  function parseDurationMs(raw, maxMs = 3_600_000) {
+    if (raw === null || raw === undefined || raw === '' || typeof raw === 'boolean') return null;
+    if (typeof raw === 'number') {
+      return Number.isFinite(raw) && raw > 0 && raw <= maxMs ? Math.round(raw) : null;
+    }
+    if (typeof raw === 'string') {
+      const s = raw.trim();
+      let ms = NaN;
+      if (/^\d+(?:\.\d+)?ms$/i.test(s)) {
+        ms = parseFloat(s.slice(0, -2));
+      } else if (/^\d+(?:\.\d+)?s$/i.test(s)) {
+        ms = parseFloat(s.slice(0, -1)) * 1000;
+      } else if (/^\d+(?:\.\d+)?$/.test(s)) {
+        ms = parseFloat(s);
+      }
+      return Number.isFinite(ms) && ms > 0 && ms <= maxMs ? Math.round(ms) : null;
+    }
+    if (typeof raw === 'object') {
+      const rawSec = raw.seconds !== undefined ? raw.seconds : raw.sec;
+      const rawNanos = raw.nanos !== undefined ? raw.nanos : raw.nano;
+      if (rawSec !== undefined || rawNanos !== undefined) {
+        const ms = Number(rawSec ?? 0) * 1000 + Number(rawNanos ?? 0) / 1e6;
+        return Number.isFinite(ms) && ms > 0 && ms <= maxMs ? Math.round(ms) : null;
+      }
+    }
+    return null;
   }
 
   function summarizeStep(step) {
@@ -1854,10 +2016,19 @@
         createdAt: null,
         finishedGeneratingAt: null,
         status: '',
-        estTokens: 0
+        estTokens: 0,
+        durationMs: null,
+        ttftMs: null,
+        hasOutputContent: false,
+        sourceCascadeId: ''
       };
     }
     const modelUsage = extractStepModelUsage(step);
+    const sourceCascadeId = String(
+      step.metadata?.sourceTrajectoryStepInfo?.cascadeId || ''
+    )
+      .trim()
+      .slice(0, 160);
     const type = typeof step.type === 'string' ? step.type.slice(0, 64) : '';
     const role = typeof step.role === 'string' ? step.role.slice(0, 32) : '';
     const status = String(step.status ?? step.stepStatus ?? step.state ?? '').slice(0, 48);
@@ -1865,9 +2036,69 @@
       step.metadata?.createdAt ?? step.createdAt ?? step.timestamp
     );
     const finishedGeneratingAt = parseResetTimeMs(
-      step.metadata?.finishedGeneratingAt ?? step.finishedGeneratingAt
+      step.metadata?.finishedGeneratingAt ??
+        step.finishedGeneratingAt ??
+        step.metadata?.completedAt ??
+        step.completedAt
     );
+    const explicitDuration = parseDurationMs(
+      step.metadata?.durationMs ??
+        step.metadata?.duration_ms ??
+        step.metadata?.latencyMs ??
+        step.durationMs ??
+        step.duration_ms ??
+        step.latencyMs ??
+        step.metadata?.duration
+    );
+    let durationMs = explicitDuration;
+    if (
+      durationMs === null &&
+      createdAt !== null &&
+      finishedGeneratingAt !== null &&
+      finishedGeneratingAt > createdAt &&
+      finishedGeneratingAt - createdAt <= 3_600_000
+    ) {
+      durationMs = Math.round(finishedGeneratingAt - createdAt);
+    }
+
+    const explicitTtft = parseDurationMs(
+      step.metadata?.ttftMs ??
+        step.metadata?.ttft_ms ??
+        step.metadata?.firstTokenMs ??
+        step.metadata?.first_token_ms ??
+        step.metadata?.timeToFirstTokenMs ??
+        step.ttftMs ??
+        step.firstTextMs ??
+        step.first_text_ms,
+      600_000
+    );
+    let ttftMs = explicitTtft;
+    if (ttftMs === null) {
+      const firstTokenAt = parseResetTimeMs(
+        step.metadata?.firstTokenAt ??
+          step.metadata?.firstGeneratingAt ??
+          step.metadata?.startedGeneratingAt ??
+          step.firstTokenAt
+      );
+      if (
+        firstTokenAt !== null &&
+        createdAt !== null &&
+        firstTokenAt > createdAt &&
+        firstTokenAt - createdAt <= 600_000
+      ) {
+        ttftMs = Math.round(firstTokenAt - createdAt);
+      }
+    }
+    if (durationMs !== null && ttftMs !== null && ttftMs > durationMs) {
+      ttftMs = null;
+    }
+
     const estTokens = estimateStepTokens(step);
+    const isUserStep = type.toUpperCase().includes('USER') || role.toUpperCase() === 'USER';
+    const hasOutputContent = Boolean(
+      (modelUsage && (modelUsage.outputTokens > 0 || modelUsage.reasoningTokens > 0)) ||
+        (!isUserStep && estTokens > 0)
+    );
     return {
       modelUsage,
       type,
@@ -1875,8 +2106,149 @@
       createdAt,
       finishedGeneratingAt,
       status,
-      estTokens
+      estTokens,
+      durationMs,
+      ttftMs,
+      hasOutputContent,
+      sourceCascadeId
     };
+  }
+
+  function createEmptyStepAccumulator() {
+    return {
+      hasExactSnapshot: false,
+      baseTokens: 0,
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      cacheWrite5mTokens: 0,
+      cacheWrite1hTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      estimatedDelta: 0,
+      latestStepModelId: '',
+      prevCacheInclusiveInput: 0,
+      prevContextUsed: 0,
+      prevSnapshotModel: '',
+      compressionDetected: false,
+      compressionBefore: 0,
+      compressionAfter: 0,
+      compressionDrop: 0,
+      sessionInputTokens: 0,
+      sessionCacheReadTokens: 0,
+      sessionCacheCreationTokens: 0,
+      sessionCacheWrite5mTokens: 0,
+      sessionCacheWrite1hTokens: 0,
+      sessionOutputTokens: 0,
+      sessionReasoningTokens: 0,
+      sessionStepPricedCount: 0,
+      subagentTotalTokens: 0,
+      lastStepTs: null,
+      lastStepDurationMs: null,
+      lastStepTtftMs: null
+    };
+  }
+
+  function foldStepIntoAccumulator(acc, s) {
+    if (!s || typeof s !== 'object') return;
+    const mu = s.modelUsage;
+    const sModel = String(mu?.model || '').trim();
+    // 过滤影子/子代理/生图模型，防止覆盖主模型 ID、上下文上限或快照
+    if (sModel && isShadowModel(sModel)) {
+      if (mu) {
+        const shIn = toNonNegInt(mu.inputTokens);
+        const shCr = toNonNegInt(mu.cacheReadTokens);
+        const shCw = toNonNegInt(mu.cacheCreationTokens);
+        const shOut = toNonNegInt(mu.outputTokens);
+        const shReason = toNonNegInt(mu.reasoningTokens);
+        const shEffOut = mu.reasoningInOutput ? Math.max(0, shOut - shReason) : shOut;
+        acc.subagentTotalTokens += shIn + shCr + shCw + shEffOut + shReason;
+      }
+      return;
+    }
+
+    if (
+      (typeof s.durationMs === 'number' && s.durationMs > 0) ||
+      (typeof s.ttftMs === 'number' && s.ttftMs > 0)
+    ) {
+      acc.lastStepDurationMs =
+        typeof s.durationMs === 'number' && s.durationMs > 0 ? Math.round(s.durationMs) : null;
+      acc.lastStepTtftMs =
+        typeof s.ttftMs === 'number' && s.ttftMs > 0 ? Math.round(s.ttftMs) : null;
+    }
+
+    const inTok = toNonNegInt(mu?.inputTokens);
+    const cacheRead = toNonNegInt(mu?.cacheReadTokens);
+    const cacheCreate = toNonNegInt(mu?.cacheCreationTokens);
+    const cacheW5m = toNonNegInt(mu?.cacheWrite5mTokens);
+    const cacheW1h = toNonNegInt(mu?.cacheWrite1hTokens);
+    const outTok = toNonNegInt(mu?.outputTokens);
+    const reasonTok = toNonNegInt(mu?.reasoningTokens);
+    const effOutTok = mu?.reasoningInOutput ? Math.max(0, outTok - reasonTok) : outTok;
+    const totalMu = inTok + cacheRead + cacheCreate + outTok;
+    const sessionStepTotal = inTok + cacheRead + cacheCreate + effOutTok + reasonTok;
+
+    if (mu && sessionStepTotal > 0) {
+      acc.sessionInputTokens += inTok;
+      acc.sessionCacheReadTokens += cacheRead;
+      acc.sessionCacheCreationTokens += cacheCreate;
+      acc.sessionCacheWrite5mTokens += cacheW5m;
+      acc.sessionCacheWrite1hTokens += cacheW1h;
+      acc.sessionOutputTokens += effOutTok;
+      acc.sessionReasoningTokens += reasonTok;
+      acc.sessionStepPricedCount += 1;
+      const stepTs = s.finishedGeneratingAt ?? s.createdAt ?? null;
+      if (typeof stepTs === 'number' && Number.isFinite(stepTs) && stepTs > (acc.lastStepTs || 0)) {
+        acc.lastStepTs = stepTs;
+      }
+    }
+
+    if (mu && totalMu > 0) {
+      const cacheInclusiveInput = inTok + cacheRead + cacheCreate;
+      const hitInputDrop =
+        acc.prevCacheInclusiveInput > 0 && acc.prevCacheInclusiveInput - cacheInclusiveInput > 5000;
+      const hitSameModelDrop =
+        Boolean(acc.prevSnapshotModel && sModel && acc.prevSnapshotModel === sModel) &&
+        acc.prevContextUsed > 0 &&
+        acc.prevContextUsed - totalMu > 5000;
+
+      if (hitInputDrop || hitSameModelDrop) {
+        acc.compressionDetected = true;
+        if (acc.prevContextUsed > totalMu) {
+          acc.compressionBefore = acc.prevContextUsed;
+          acc.compressionAfter = totalMu;
+        } else {
+          acc.compressionBefore = acc.prevCacheInclusiveInput;
+          acc.compressionAfter = cacheInclusiveInput;
+        }
+        const rawDrop = Math.max(0, acc.compressionBefore - acc.compressionAfter);
+        acc.compressionDrop =
+          acc.compressionBefore > 0
+            ? Math.max(1, Math.round((rawDrop / acc.compressionBefore) * 100))
+            : 0;
+      }
+
+      acc.prevCacheInclusiveInput = cacheInclusiveInput;
+      acc.prevContextUsed = totalMu;
+      if (sModel) acc.prevSnapshotModel = sModel;
+
+      acc.hasExactSnapshot = true;
+      acc.baseTokens = totalMu;
+      acc.inputTokens = inTok;
+      acc.cacheReadTokens = cacheRead;
+      acc.cacheCreationTokens = cacheCreate;
+      acc.cacheWrite5mTokens = cacheW5m;
+      acc.cacheWrite1hTokens = cacheW1h;
+      acc.outputTokens = outTok;
+      acc.reasoningTokens = reasonTok;
+      acc.estimatedDelta = 0;
+      if (sModel) acc.latestStepModelId = sModel;
+    } else {
+      if (sModel && !acc.latestStepModelId) acc.latestStepModelId = sModel;
+      if (!mu || sessionStepTotal === 0) {
+        acc.estimatedDelta += toNonNegInt(s.estTokens);
+      }
+    }
   }
 
   function getOrCreateConvTelemetry(convId) {
@@ -1891,6 +2263,10 @@
         totalStepCount: 0,
         stepOffsetBase: 0,
         steps: [],
+        evictedSessionAcc: createEmptyStepAccumulator(),
+        pricedStepLog: new Map(),
+        minLoggedPricedIdx: 0,
+        liveStepTimings: new Map(),
         hasExactSourceSteps: false,
         contextWindowUsage: null,
         lastStreamTs: 0,
@@ -1909,77 +2285,12 @@
   function analyzeConversationSteps(convEntry, composerInfo = null) {
     const convId = String(convEntry?.convId || '');
     const steps = Array.isArray(convEntry?.steps) ? convEntry.steps : [];
-
-    let hasExactSnapshot = false;
-    let baseTokens = 0;
-    let inputTokens = 0;
-    let cacheReadTokens = 0;
-    let cacheCreationTokens = 0;
-    let outputTokens = 0;
-    let estimatedDelta = 0;
-    let latestStepModelId = '';
-
-    let prevCacheInclusiveInput = 0;
-    let prevContextUsed = 0;
-    let prevSnapshotModel = '';
-    let compressionDetected = false;
-    let compressionBefore = 0;
-    let compressionAfter = 0;
-    let compressionDrop = 0;
+    const acc = convEntry?.evictedSessionAcc
+      ? { ...convEntry.evictedSessionAcc }
+      : createEmptyStepAccumulator();
 
     for (let i = 0; i < steps.length; i++) {
-      const s = steps[i];
-      if (!s || typeof s !== 'object') continue;
-      const mu = s.modelUsage;
-      const sModel = String(mu?.model || '').trim();
-      // 过滤影子/子代理/生图模型，防止覆盖主模型 ID、上下文上限或快照
-      if (sModel && isShadowModel(sModel)) continue;
-
-      const inTok = toNonNegInt(mu?.inputTokens);
-      const cacheRead = toNonNegInt(mu?.cacheReadTokens);
-      const cacheCreate = toNonNegInt(mu?.cacheCreationTokens);
-      const outTok = toNonNegInt(mu?.outputTokens);
-      const totalMu = inTok + cacheRead + cacheCreate + outTok;
-
-      if (mu && totalMu > 0) {
-        const cacheInclusiveInput = inTok + cacheRead + cacheCreate;
-        const hitInputDrop =
-          prevCacheInclusiveInput > 0 && prevCacheInclusiveInput - cacheInclusiveInput > 5000;
-        const hitSameModelDrop =
-          Boolean(prevSnapshotModel && sModel && prevSnapshotModel === sModel) &&
-          prevContextUsed > 0 &&
-          prevContextUsed - totalMu > 5000;
-
-        if (hitInputDrop || hitSameModelDrop) {
-          compressionDetected = true;
-          if (prevContextUsed > totalMu) {
-            compressionBefore = prevContextUsed;
-            compressionAfter = totalMu;
-          } else {
-            compressionBefore = prevCacheInclusiveInput;
-            compressionAfter = cacheInclusiveInput;
-          }
-          const rawDrop = Math.max(0, compressionBefore - compressionAfter);
-          compressionDrop =
-            compressionBefore > 0 ? Math.max(1, Math.round((rawDrop / compressionBefore) * 100)) : 0;
-        }
-
-        prevCacheInclusiveInput = cacheInclusiveInput;
-        prevContextUsed = totalMu;
-        if (sModel) prevSnapshotModel = sModel;
-
-        hasExactSnapshot = true;
-        baseTokens = totalMu;
-        inputTokens = inTok;
-        cacheReadTokens = cacheRead;
-        cacheCreationTokens = cacheCreate;
-        outputTokens = outTok;
-        estimatedDelta = 0;
-        if (sModel) latestStepModelId = sModel;
-      } else {
-        if (sModel && !latestStepModelId) latestStepModelId = sModel;
-        estimatedDelta += toNonNegInt(s.estTokens);
-      }
+      foldStepIntoAccumulator(acc, steps[i]);
     }
 
     const composerOwned = Boolean(composerInfo && composerInfo.convId === convId);
@@ -1987,7 +2298,7 @@
       (composerOwned && composerInfo.modelId && !isShadowModel(composerInfo.modelId)
         ? composerInfo.modelId
         : '') ||
-      latestStepModelId ||
+      acc.latestStepModelId ||
       (convEntry?.modelId && !isShadowModel(convEntry.modelId) ? convEntry.modelId : '') ||
       (composerInfo?.modelId && !isShadowModel(composerInfo.modelId) ? composerInfo.modelId : '') ||
       '';
@@ -2008,12 +2319,19 @@
       cwu && cwu.limit > 10000 ? cwu.limit : getDynamicContextLimit(primaryModelId, modelLabel);
 
     let precision = 'estimated';
-    let contextUsed = estimatedDelta;
+    let contextUsed = acc.estimatedDelta;
+    let inputTokens = acc.inputTokens;
+    let cacheReadTokens = acc.cacheReadTokens;
+    let cacheCreationTokens = acc.cacheCreationTokens;
+    let cacheWrite5mTokens = acc.cacheWrite5mTokens;
+    let cacheWrite1hTokens = acc.cacheWrite1hTokens;
+    let outputTokens = acc.outputTokens;
+    let reasoningTokens = acc.reasoningTokens;
     let cacheHitRate = 0;
 
-    if (hasExactSnapshot) {
+    if (acc.hasExactSnapshot) {
       precision = 'exact';
-      contextUsed = baseTokens + estimatedDelta;
+      contextUsed = acc.baseTokens + acc.estimatedDelta;
       const totalInSide = inputTokens + cacheReadTokens + cacheCreationTokens;
       cacheHitRate = totalInSide > 0 ? Math.round((cacheReadTokens / totalInSide) * 100) : 0;
     } else {
@@ -2023,9 +2341,13 @@
       inputTokens = 0;
       cacheReadTokens = 0;
       cacheCreationTokens = 0;
+      cacheWrite5mTokens = 0;
+      cacheWrite1hTokens = 0;
       outputTokens = 0;
+      reasoningTokens = 0;
       cacheHitRate = 0;
     }
+    let compressionDetected = acc.compressionDetected;
     if (!compressionDetected && cwu && cwu.estimatedAfterCompaction === true) {
       compressionDetected = true;
     }
@@ -2055,6 +2377,17 @@
       (convEntry?.stepOffsetBase || 0) + steps.length
     );
 
+    const sessionTotalTokens =
+      acc.sessionInputTokens +
+      acc.sessionCacheReadTokens +
+      acc.sessionCacheCreationTokens +
+      acc.sessionOutputTokens +
+      acc.sessionReasoningTokens;
+    const sessionInputSide =
+      acc.sessionInputTokens + acc.sessionCacheReadTokens + acc.sessionCacheCreationTokens;
+    const sessionCacheHitRate =
+      sessionInputSide > 0 ? Math.round((acc.sessionCacheReadTokens / sessionInputSide) * 100) : 0;
+
     return {
       convId,
       modelId: primaryModelId,
@@ -2066,19 +2399,37 @@
       inputTokens,
       cacheReadTokens,
       cacheCreationTokens,
+      cacheWrite5mTokens,
+      cacheWrite1hTokens,
       outputTokens,
-      estimatedDelta,
+      reasoningTokens,
+      estimatedDelta: acc.estimatedDelta,
       cacheHitRate,
       tokPerSec,
       avgTokPerSec,
       compressionDetected,
-      compressionBefore,
-      compressionAfter,
-      compressionDrop,
+      compressionBefore: acc.compressionBefore,
+      compressionAfter: acc.compressionAfter,
+      compressionDrop: acc.compressionDrop,
       precision,
+      isRunning: Boolean(convEntry?.isRunning),
       remainingFraction,
       resetTimeMs,
-      stepCount
+      stepCount,
+      sessionInputTokens: acc.sessionInputTokens,
+      sessionCacheReadTokens: acc.sessionCacheReadTokens,
+      sessionCacheCreationTokens: acc.sessionCacheCreationTokens,
+      sessionCacheWrite5mTokens: acc.sessionCacheWrite5mTokens,
+      sessionCacheWrite1hTokens: acc.sessionCacheWrite1hTokens,
+      sessionOutputTokens: acc.sessionOutputTokens,
+      sessionReasoningTokens: acc.sessionReasoningTokens,
+      sessionTotalTokens,
+      sessionCacheHitRate,
+      sessionStepPricedCount: acc.sessionStepPricedCount,
+      lastStepTs: acc.lastStepTs,
+      subagentTotalTokens: acc.subagentTotalTokens,
+      lastStepDurationMs: acc.lastStepDurationMs,
+      lastStepTtftMs: acc.lastStepTtftMs
     };
   }
 
@@ -2121,10 +2472,206 @@
     return /RUNNING|WORKING|IN_PROGRESS|GENERATING|STREAMING|EXECUTING/.test(st);
   }
 
+  function applyStepLiveTiming(entry, absIdx, rawStep, next, prev, ctx) {
+    if (!next || typeof next !== 'object') return next;
+    const isUserStep =
+      next.type.toUpperCase().includes('USER') || next.role.toUpperCase() === 'USER';
+    if (isUserStep) return next;
+
+    if (!(entry.liveStepTimings instanceof Map)) {
+      entry.liveStepTimings = new Map();
+    }
+    const now = ctx.now;
+    const isRunningStep = isStepStatusRunning(rawStep);
+    const hasOutput = Boolean(next.hasOutputContent);
+    let timing = entry.liveStepTimings.get(absIdx) || null;
+
+    if (!timing && (ctx.source !== 'fiber' || isRunningStep)) {
+      if (
+        isRunningStep &&
+        (!hasOutput || next.createdAt === null || now - next.createdAt <= 15_000)
+      ) {
+        const rawStart = next.createdAt ?? ctx.streamReqStartedAt ?? now;
+        timing = {
+          startAt: Number.isFinite(rawStart) ? rawStart : now,
+          firstOutputAt: null,
+          finishedAt: null
+        };
+        entry.liveStepTimings.set(absIdx, timing);
+        if (entry.liveStepTimings.size > 32) {
+          const oldestKey = entry.liveStepTimings.keys().next().value;
+          if (oldestKey !== undefined) entry.liveStepTimings.delete(oldestKey);
+        }
+      }
+    }
+
+    if (timing) {
+      if (
+        timing.firstOutputAt === null &&
+        hasOutput &&
+        now > timing.startAt &&
+        now - timing.startAt <= 600_000
+      ) {
+        timing.firstOutputAt = now;
+      }
+      if (
+        timing.finishedAt === null &&
+        !isRunningStep &&
+        hasOutput &&
+        now >= timing.startAt &&
+        now - timing.startAt <= 3_600_000
+      ) {
+        timing.finishedAt =
+          next.finishedGeneratingAt !== null && next.finishedGeneratingAt > timing.startAt
+            ? next.finishedGeneratingAt
+            : now;
+      }
+    }
+
+    const observedTtft =
+      timing && timing.firstOutputAt !== null && timing.firstOutputAt > timing.startAt
+        ? Math.round(timing.firstOutputAt - timing.startAt)
+        : null;
+    const streamTailTtft =
+      ctx.isTail &&
+      isRunningStep &&
+      typeof ctx.streamTtftMs === 'number' &&
+      ctx.streamTtftMs > 0 &&
+      ctx.streamTtftMs <= 600_000
+        ? Math.round(ctx.streamTtftMs)
+        : null;
+    const observedDur =
+      timing && timing.finishedAt !== null && timing.finishedAt > timing.startAt
+        ? Math.round(timing.finishedAt - timing.startAt)
+        : null;
+
+    let mergedTtft = next.ttftMs ?? prev?.ttftMs ?? observedTtft ?? streamTailTtft ?? null;
+    let mergedDur = next.durationMs ?? prev?.durationMs ?? observedDur ?? null;
+    if (typeof mergedTtft !== 'number' || !Number.isFinite(mergedTtft) || mergedTtft <= 0) {
+      mergedTtft = null;
+    } else {
+      mergedTtft = Math.round(mergedTtft);
+    }
+    if (typeof mergedDur !== 'number' || !Number.isFinite(mergedDur) || mergedDur <= 0) {
+      mergedDur = null;
+    } else {
+      mergedDur = Math.round(mergedDur);
+    }
+    if (mergedDur !== null && mergedTtft !== null && mergedTtft > mergedDur) {
+      mergedTtft = mergedDur;
+    }
+
+    const mergedCreatedAt = next.createdAt ?? prev?.createdAt ?? timing?.startAt ?? null;
+    const mergedFinishedAt =
+      next.finishedGeneratingAt ?? prev?.finishedGeneratingAt ?? timing?.finishedAt ?? null;
+
+    if (
+      mergedTtft !== next.ttftMs ||
+      mergedDur !== next.durationMs ||
+      mergedCreatedAt !== next.createdAt ||
+      mergedFinishedAt !== next.finishedGeneratingAt
+    ) {
+      return {
+        ...next,
+        ttftMs: mergedTtft,
+        durationMs: mergedDur,
+        createdAt: mergedCreatedAt,
+        finishedGeneratingAt: mergedFinishedAt
+      };
+    }
+    return next;
+  }
+
+  function isEligibleLedgerConvId(convId) {
+    return (
+      typeof convId === 'string' &&
+      convId.length >= 6 &&
+      convId.length <= 160 &&
+      !convId.startsWith('composer-panel-') &&
+      !GENERIC_CONTAINER_KEY_RE.test(convId)
+    );
+  }
+
+  function recordPricedStep(entry, absIndex, s, rawStep) {
+    if (!entry || !s || typeof s !== 'object') return;
+    const convId = String(entry.convId || '');
+    if (!isEligibleLedgerConvId(convId)) return;
+    const mu = s.modelUsage;
+    if (!mu || typeof mu !== 'object') return;
+    if (mu.model && isShadowModel(mu.model)) return;
+
+    const inTok = toNonNegInt(mu.inputTokens);
+    const crTok = toNonNegInt(mu.cacheReadTokens);
+    const cw5mTok = toNonNegInt(mu.cacheWrite5mTokens);
+    const cw1hTok = toNonNegInt(mu.cacheWrite1hTokens);
+    const cwTok = Math.max(toNonNegInt(mu.cacheCreationTokens), cw5mTok + cw1hTok);
+    const rawOutTok = toNonNegInt(mu.outputTokens);
+    const rsTok = toNonNegInt(mu.reasoningTokens);
+    const effOutTok = mu.reasoningInOutput ? Math.max(0, rawOutTok - rsTok) : rawOutTok;
+    const stepTotal = inTok + crTok + cwTok + effOutTok + rsTok;
+    if (stepTotal <= 0) return;
+
+    const rawModelId = String(mu.model || entry.modelId || '').trim();
+    const resolvedModelId = netModelIdByNumValue.get(rawModelId) || rawModelId;
+    const modelLabel =
+      findModelMeta(resolvedModelId, entry.modelLabel)?.label || entry.modelLabel || '';
+    const observedLive = Boolean(
+      entry.liveStepTimings?.has(absIndex) || isStepStatusRunning(rawStep)
+    );
+
+    if (!(entry.pricedStepLog instanceof Map)) {
+      entry.pricedStepLog = new Map();
+    }
+    const prevRec = entry.pricedStepLog.get(absIndex);
+    const liveTiming = entry.liveStepTimings?.get(absIndex) || null;
+    entry.pricedStepLog.set(absIndex, {
+      idx: absIndex,
+      m: resolvedModelId,
+      ml: modelLabel,
+      in: inTok,
+      cr: crTok,
+      cw: cwTok,
+      cw5m: cw5mTok,
+      cw1h: cw1hTok,
+      out: effOutTok,
+      rs: rsTok,
+      ts:
+        s.finishedGeneratingAt ??
+        s.createdAt ??
+        liveTiming?.finishedAt ??
+        liveTiming?.startAt ??
+        prevRec?.ts ??
+        (observedLive ? Date.now() : null),
+      dur: s.durationMs ?? prevRec?.dur ?? null,
+      ttft: s.ttftMs ?? prevRec?.ttft ?? null,
+      fork: Boolean((s.sourceCascadeId && s.sourceCascadeId !== convId) || prevRec?.fork),
+      live: Boolean(observedLive || prevRec?.live)
+    });
+
+    if (entry.pricedStepLog.size > MAX_PRICED_STEP_LOG) {
+      let oldestIdx = Infinity;
+      for (const k of entry.pricedStepLog.keys()) {
+        if (k < oldestIdx) oldestIdx = k;
+      }
+      if (Number.isFinite(oldestIdx)) {
+        entry.pricedStepLog.delete(oldestIdx);
+        entry.minLoggedPricedIdx = Math.max(entry.minLoggedPricedIdx || 0, oldestIdx + 1);
+      }
+    }
+  }
+
   function upsertConvSteps(
     convId,
     rawSteps,
-    { stepOffset = 0, isIncremental = false, isStepsSource = true, source = 'network', isRunningHint = false } = {}
+    {
+      stepOffset = 0,
+      isIncremental = false,
+      isStepsSource = true,
+      source = 'network',
+      isRunningHint = false,
+      streamReqStartedAt = null,
+      streamTtftMs = null
+    } = {}
   ) {
     if (!convId || !Array.isArray(rawSteps) || rawSteps.length === 0) return false;
     const entry = getOrCreateConvTelemetry(convId);
@@ -2136,7 +2683,8 @@
         s.modelUsage.inputTokens +
           s.modelUsage.cacheReadTokens +
           s.modelUsage.cacheCreationTokens +
-          s.modelUsage.outputTokens >
+          s.modelUsage.outputTokens +
+          s.modelUsage.reasoningTokens >
           0
     );
 
@@ -2156,33 +2704,58 @@
       effOffset = 0;
     }
 
+    const now = Date.now();
+    const timingBaseCtx = {
+      source,
+      streamReqStartedAt,
+      streamTtftMs,
+      now
+    };
+
     if (entry.steps.length === 0 || (!isIncremental && effOffset === 0)) {
       const prevSteps = entry.steps;
       const prevBase = entry.stepOffsetBase;
+      if (effOffset === 0 && summarized.length < prevBase && entry.pricedStepLog instanceof Map) {
+        entry.pricedStepLog.clear();
+        entry.minLoggedPricedIdx = 0;
+      }
+      entry.evictedSessionAcc = createEmptyStepAccumulator();
       const merged = summarized.map((s, idx) => {
-        if (
+        const prev = prevBase === 0 ? prevSteps[idx] : null;
+        let next =
           source === 'fiber' &&
           !s.modelUsage &&
-          prevBase === 0 &&
-          prevSteps[idx]?.modelUsage &&
-          prevSteps[idx].type === s.type &&
-          prevSteps[idx].role === s.role
-        ) {
-          return { ...s, modelUsage: prevSteps[idx].modelUsage };
-        }
-        return s;
+          prev?.modelUsage &&
+          prev.type === s.type &&
+          prev.role === s.role
+            ? { ...s, modelUsage: prev.modelUsage }
+            : s;
+        next = applyStepLiveTiming(entry, effOffset + idx, rawSteps[idx], next, prev, {
+          ...timingBaseCtx,
+          isTail: idx === summarized.length - 1
+        });
+        recordPricedStep(entry, effOffset + idx, next, rawSteps[idx]);
+        return next;
       });
       entry.stepOffsetBase = effOffset;
       entry.steps = merged;
     } else if (effOffset < entry.stepOffsetBase) {
+      entry.evictedSessionAcc = createEmptyStepAccumulator();
       entry.stepOffsetBase = effOffset;
-      entry.steps = summarized;
+      entry.steps = summarized.map((s, idx) => {
+        const next = applyStepLiveTiming(entry, effOffset + idx, rawSteps[idx], s, null, {
+          ...timingBaseCtx,
+          isTail: idx === summarized.length - 1
+        });
+        recordPricedStep(entry, effOffset + idx, next, rawSteps[idx]);
+        return next;
+      });
     } else {
       const relStart = effOffset - entry.stepOffsetBase;
       for (let i = 0; i < summarized.length; i++) {
         const targetIdx = relStart + i;
         const prev = entry.steps[targetIdx];
-        const next = summarized[i];
+        let next = summarized[i];
         if (
           source === 'fiber' &&
           !next.modelUsage &&
@@ -2190,10 +2763,14 @@
           prev.type === next.type &&
           prev.role === next.role
         ) {
-          entry.steps[targetIdx] = { ...next, modelUsage: prev.modelUsage };
-        } else {
-          entry.steps[targetIdx] = next;
+          next = { ...next, modelUsage: prev.modelUsage };
         }
+        next = applyStepLiveTiming(entry, effOffset + i, rawSteps[i], next, prev, {
+          ...timingBaseCtx,
+          isTail: i === summarized.length - 1
+        });
+        entry.steps[targetIdx] = next;
+        recordPricedStep(entry, effOffset + i, next, rawSteps[i]);
       }
       if (entry.totalStepCount === 0 || effOffset + summarized.length >= entry.totalStepCount) {
         entry.steps.length = relStart + summarized.length;
@@ -2202,7 +2779,13 @@
 
     if (entry.steps.length > MAX_STEPS_PER_CONV) {
       const drop = entry.steps.length - MAX_STEPS_PER_CONV;
-      entry.steps.splice(0, drop);
+      const evicted = entry.steps.splice(0, drop);
+      if (!entry.evictedSessionAcc) {
+        entry.evictedSessionAcc = createEmptyStepAccumulator();
+      }
+      for (let i = 0; i < evicted.length; i++) {
+        foldStepIntoAccumulator(entry.evictedSessionAcc, evicted[i]);
+      }
       entry.stepOffsetBase += drop;
     }
 
@@ -2213,13 +2796,24 @@
     entry.updatedAt = Date.now();
 
     const lastStep = rawSteps[rawSteps.length - 1];
+    const lastStepRawStatus = String(
+      lastStep?.status ?? lastStep?.stepStatus ?? lastStep?.state ?? ''
+    ).trim();
+    const lastStepTerminal =
+      isStepsSource &&
+      effOffset + summarized.length >= entry.totalStepCount &&
+      /^(?:CORTEX_STEP_STATUS_)?(?:DONE|COMPLETED|COMPLETE|FINISHED|FAILED|ERROR|CANCELLED|CANCELED|ABORTED|STOPPED)$/i.test(
+        lastStepRawStatus
+      );
     const netConv = netConvsById.get(`id::${convId}`);
-    const runningNow = Boolean(
-      isRunningHint ||
-        entry.isRunning ||
-        netConv?.state === 'running' ||
-        isStepStatusRunning(lastStep)
-    );
+    const runningNow = lastStepTerminal && !isRunningHint && netConv?.state !== 'running'
+      ? false
+      : Boolean(
+          isRunningHint ||
+            entry.isRunning ||
+            netConv?.state === 'running' ||
+            isStepStatusRunning(lastStep)
+        );
     entry.isRunning = runningNow;
     updateStreamSpeed(entry, runningNow);
 
@@ -2433,27 +3027,32 @@
         }
 
         // 2. 捕获模型配额与上下文配置 (`userStatus` / `cascadeModelConfigData` / `clientModelConfigs` / `currentModelConfig`)
+        const ingestSource = meta.source || 'network';
         const clientConfigs =
           val.userStatus?.cascadeModelConfigData?.clientModelConfigs ??
           val.cascadeModelConfigData?.clientModelConfigs ??
           val.clientModelConfigs;
         if (Array.isArray(clientConfigs)) {
           for (const cfg of clientConfigs) {
-            if (upsertModelConfig(extractModelConfigInfo(cfg))) changed = true;
+            if (upsertModelConfig(extractModelConfigInfo(cfg), ingestSource)) changed = true;
           }
         }
         for (const key of ['currentModelConfig', 'selectedModelConfig', 'activeModelConfig', 'modelConfig']) {
           if (val[key] && typeof val[key] === 'object') {
-            if (upsertModelConfig(extractModelConfigInfo(val[key]))) changed = true;
+            if (upsertModelConfig(extractModelConfigInfo(val[key]), ingestSource)) changed = true;
           }
         }
         if ('quotaInfo' in val && ('modelOrAlias' in val || 'modelId' in val || 'label' in val)) {
-          if (upsertModelConfig(extractModelConfigInfo(val))) changed = true;
+          if (upsertModelConfig(extractModelConfigInfo(val), ingestSource)) changed = true;
         }
 
         // 3. 捕获 `trajectorySummaries`
         if (val.trajectorySummaries && typeof val.trajectorySummaries === 'object') {
-          if (ingestTrajectorySummaries(val.trajectorySummaries, { isAuthoritative: isAuthoritativeTrajectories })) {
+          const rawSummaries =
+            val.trajectorySummaries.summaries && typeof val.trajectorySummaries.summaries === 'object'
+              ? val.trajectorySummaries.summaries
+              : val.trajectorySummaries;
+          if (ingestTrajectorySummaries(rawSummaries, { isAuthoritative: isAuthoritativeTrajectories })) {
             changed = true;
           }
         }
@@ -2525,7 +3124,9 @@
               isIncremental: isInc,
               isStepsSource: Boolean(primarySteps),
               source: meta.source || 'network',
-              isRunningHint: norm.state === 'running'
+              isRunningHint: norm.state === 'running',
+              streamReqStartedAt: !meta.isReadPoll ? meta.reqStartedAt || null : null,
+              streamTtftMs: !meta.isReadPoll ? meta.streamTtftMs || null : null
             })
           ) {
             changed = true;
@@ -2542,7 +3143,9 @@
                 isIncremental: true,
                 isStepsSource: true,
                 source: meta.source || 'network',
-                isRunningHint: isStepStatusRunning(val.step)
+                isRunningHint: isStepStatusRunning(val.step),
+                streamReqStartedAt: !meta.isReadPoll ? meta.reqStartedAt || null : null,
+                streamTtftMs: !meta.isReadPoll ? meta.streamTtftMs || null : null
               })
             ) {
               changed = true;
@@ -2704,7 +3307,11 @@
       url: urlStr,
       hintConvId: bodyHint?.convId || extractConvIdFromUrl(urlStr),
       requestStepOffset: bodyHint?.stepOffset || 0,
-      isStepsEndpoint: /GetCascadeTrajectorySteps|GetCascadeTrajectory/i.test(urlStr)
+      isStepsEndpoint: /GetCascadeTrajectorySteps|GetCascadeTrajectory/i.test(urlStr),
+      reqStartedAt: Date.now(),
+      isReadPoll: READ_ONLY_POLL_ENDPOINT_RE.test(urlStr),
+      firstChunkAt: null,
+      streamTtftMs: null
     };
   }
 
@@ -2746,6 +3353,16 @@
         if (!value || !value.byteLength) continue;
         chunks++;
         totalBytes += value.byteLength;
+        if (meta && !meta.isReadPoll && meta.firstChunkAt === null) {
+          meta.firstChunkAt = Date.now();
+          if (
+            typeof meta.reqStartedAt === 'number' &&
+            meta.firstChunkAt > meta.reqStartedAt &&
+            meta.firstChunkAt - meta.reqStartedAt <= 600_000
+          ) {
+            meta.streamTtftMs = meta.firstChunkAt - meta.reqStartedAt;
+          }
+        }
 
         if (isConnectStream) {
           const merged = new Uint8Array(byteBuf.length + value.byteLength);
@@ -2886,6 +3503,8 @@
         const ws = new OrigWS(...args);
         ws.addEventListener('message', (ev) => {
           try {
+            netDataDirty = true;
+            lastBridgeCacheTs = 0;
             let textData = '';
             if (typeof ev.data === 'string') {
               textData = ev.data;
@@ -3000,8 +3619,8 @@
 
       const stepOffset =
         !entry || entry.steps.length === 0
-          ? totalSteps > 80
-            ? totalSteps - 80
+          ? totalSteps > MAX_STEPS_PER_CONV
+            ? totalSteps - MAX_STEPS_PER_CONV
             : 0
           : Math.max(0, knownEnd - 5);
 
@@ -3305,7 +3924,7 @@
           if (!mc || typeof mc !== 'object') continue;
           const info = extractModelConfigInfo(mc);
           if (info) {
-            upsertModelConfig(info);
+            upsertModelConfig(info, 'fiber');
             if (!modelId) modelId = info.modelId;
             if (!modelLabel) modelLabel = info.label;
             if (!quota && info.hasQuotaInfo) {
@@ -3407,7 +4026,172 @@
     return { composers, rootFound, urlConvId };
   }
 
+  function recordQuotaPoolSample(poolKey, remainingFraction, resetTimeMs, nowMs) {
+    if (poolKey !== 'gemini' && poolKey !== 'premium') return;
+    if (typeof remainingFraction !== 'number' || !Number.isFinite(remainingFraction)) return;
+    const frac = Math.max(0, Math.min(1, remainingFraction));
+    const normReset =
+      typeof resetTimeMs === 'number' &&
+      Number.isFinite(resetTimeMs) &&
+      resetTimeMs > SENTINEL_CUTOFF_MS
+        ? Math.round(resetTimeMs)
+        : null;
+    const buf = quotaHistoryByPool[poolKey];
+    if (buf.length > 0) {
+      const last = buf[buf.length - 1];
+      if (
+        frac > last.frac + 0.03 ||
+        (normReset !== null &&
+          last.resetTimeMs !== null &&
+          Math.abs(normReset - last.resetTimeMs) > 10 * 60 * 1000)
+      ) {
+        buf.length = 0;
+      } else if (Math.abs(frac - last.frac) < 1e-4 && nowMs - last.ts < 30_000) {
+        return;
+      }
+    }
+    buf.push({ ts: nowMs, frac, resetTimeMs: normReset });
+    while (buf.length > 0 && nowMs - buf[0].ts > QUOTA_HISTORY_MAX_AGE_MS) {
+      buf.shift();
+    }
+    while (buf.length > QUOTA_HISTORY_MAX_SAMPLES) {
+      buf.shift();
+    }
+  }
+
+  function computePoolSlopeEta(buf, frac, timeLeftMs, nowMs) {
+    if (
+      !Array.isArray(buf) ||
+      buf.length < 2 ||
+      frac <= 0 ||
+      typeof timeLeftMs !== 'number' ||
+      !Number.isFinite(timeLeftMs) ||
+      timeLeftMs <= 0
+    ) {
+      return { burnRatePerHour: null, etaMs: null };
+    }
+    let lastDropIdx = -1;
+    for (let i = buf.length - 2; i >= 0; i--) {
+      if (buf[i].frac > frac + 0.002) {
+        lastDropIdx = i;
+        break;
+      }
+    }
+    if (lastDropIdx === -1 || nowMs - buf[lastDropIdx + 1].ts > QUOTA_STALE_IDLE_MS) {
+      return { burnRatePerHour: null, etaMs: null };
+    }
+    const anchor = buf[0];
+    const dtMs = nowMs - anchor.ts;
+    const dropFrac = anchor.frac - frac;
+    if (dtMs < QUOTA_MIN_SLOPE_SPAN_MS || dropFrac < QUOTA_MIN_SLOPE_DROP_FRAC) {
+      return { burnRatePerHour: null, etaMs: null };
+    }
+    const burnPerMs = dropFrac / dtMs;
+    if (!Number.isFinite(burnPerMs) || burnPerMs <= 0) {
+      return { burnRatePerHour: null, etaMs: null };
+    }
+    const burnRatePerHour = Math.round(burnPerMs * 3_600_000 * 1000) / 1000;
+    const rawEtaMs = frac / burnPerMs;
+    if (!Number.isFinite(rawEtaMs) || rawEtaMs <= 0 || rawEtaMs >= timeLeftMs) {
+      return { burnRatePerHour, etaMs: null };
+    }
+    return {
+      burnRatePerHour,
+      etaMs: Math.max(60_000, Math.round(rawEtaMs))
+    };
+  }
+
+  function computeQuotaPoolPaceAndEta(poolKey, rawPool, nowMs = Date.now()) {
+    if (!rawPool || typeof rawPool !== 'object') return null;
+    const rawFrac = rawPool.remainingFraction;
+    const resetTimeMs = rawPool.resetTimeMs ?? null;
+    if (typeof rawFrac !== 'number' || !Number.isFinite(rawFrac)) {
+      return {
+        ...rawPool,
+        timeLeftMs: null,
+        timeLeftRatio: null,
+        paceRatio: null,
+        paceStatus: null,
+        burnRatePerHour: null,
+        etaMs: null,
+        unusedPreResetHint: false
+      };
+    }
+    const frac = Math.max(0, Math.min(1, rawFrac));
+    recordQuotaPoolSample(poolKey, frac, resetTimeMs, nowMs);
+
+    if (
+      typeof resetTimeMs !== 'number' ||
+      !Number.isFinite(resetTimeMs) ||
+      resetTimeMs <= SENTINEL_CUTOFF_MS ||
+      resetTimeMs <= nowMs
+    ) {
+      const hasResetTs =
+        typeof resetTimeMs === 'number' &&
+        Number.isFinite(resetTimeMs) &&
+        resetTimeMs > SENTINEL_CUTOFF_MS;
+      return {
+        ...rawPool,
+        remainingFraction: frac,
+        timeLeftMs: hasResetTs ? 0 : null,
+        timeLeftRatio: null,
+        paceRatio: null,
+        paceStatus: null,
+        burnRatePerHour: null,
+        etaMs: null,
+        unusedPreResetHint: false
+      };
+    }
+
+    const timeLeftMs = Math.max(0, Math.round(resetTimeMs - nowMs));
+    const timeLeftRatio = Math.min(1, Math.max(0, timeLeftMs / QUOTA_WINDOW_MS));
+    let rawPace;
+    if (frac <= 0) {
+      rawPace = 0;
+    } else if (timeLeftRatio > 0.02) {
+      rawPace = frac / timeLeftRatio;
+    } else {
+      rawPace = Math.max(1, frac / 0.02);
+    }
+    const paceRatio = Number.isFinite(rawPace)
+      ? Math.round(Math.min(9.9, Math.max(0, rawPace)) * 100 + 1e-9) / 100
+      : null;
+
+    let paceStatus = null;
+    if (paceRatio !== null) {
+      if (paceRatio >= 1.1) paceStatus = 'comfortable';
+      else if (paceRatio < 0.7 && frac < 0.8) paceStatus = 'fast';
+      else paceStatus = 'balanced';
+    }
+
+    const unusedPreResetHint = Boolean(
+      timeLeftMs > 0 &&
+        timeLeftMs <= QUOTA_PRE_RESET_WINDOW_MS &&
+        frac >= QUOTA_PRE_RESET_MIN_FRAC
+    );
+
+    const { burnRatePerHour, etaMs } = computePoolSlopeEta(
+      quotaHistoryByPool[poolKey],
+      frac,
+      timeLeftMs,
+      nowMs
+    );
+
+    return {
+      ...rawPool,
+      remainingFraction: frac,
+      timeLeftMs,
+      timeLeftRatio: Math.round(timeLeftRatio * 10000) / 10000,
+      paceRatio,
+      paceStatus,
+      burnRatePerHour,
+      etaMs,
+      unusedPreResetHint
+    };
+  }
+
   function buildTelemetryPayload(composers, urlConvId) {
+    const payloadNow = Date.now();
     const models = [];
     for (const m of netModelsById.values()) {
       if (isShadowModel(m.modelId, m.label)) continue;
@@ -3417,7 +4201,8 @@
         pool: m.pool,
         contextLimit: getDynamicContextLimit(m.modelId, m.label),
         remainingFraction: m.remainingFraction,
-        resetTimeMs: m.resetTimeMs
+        resetTimeMs: m.resetTimeMs,
+        quotaObservedAt: m.quotaObservedAt ?? null
       });
     }
 
@@ -3430,7 +4215,8 @@
         quotaPools[m.pool] = {
           remainingFraction: m.remainingFraction,
           resetTimeMs: m.resetTimeMs,
-          sampleLabel: m.label || m.modelId
+          sampleLabel: m.label || m.modelId,
+          observedAt: m.quotaObservedAt || payloadNow
         };
         continue;
       }
@@ -3459,9 +4245,19 @@
         quotaPools[m.pool] = {
           remainingFraction: m.remainingFraction,
           resetTimeMs: m.resetTimeMs,
-          sampleLabel: m.label || m.modelId
+          sampleLabel: m.label || m.modelId,
+          observedAt: m.quotaObservedAt || payloadNow
         };
+      } else if ((m.quotaObservedAt || 0) > (cur.observedAt || 0)) {
+        cur.observedAt = m.quotaObservedAt;
       }
+    }
+
+    if (quotaPools.gemini) {
+      quotaPools.gemini = computeQuotaPoolPaceAndEta('gemini', quotaPools.gemini, payloadNow);
+    }
+    if (quotaPools.premium) {
+      quotaPools.premium = computeQuotaPoolPaceAndEta('premium', quotaPools.premium, payloadNow);
     }
 
     const composerByConvId = new Map();
@@ -3714,6 +4510,39 @@
     for (const st of discoveredStores) {
       try {
         const stVal = st.getState();
+        if (stVal && typeof stVal === 'object') {
+          if (stVal.sidebarProjects && typeof stVal.sidebarProjects === 'object') {
+            scanArbitraryDataTree(
+              stVal.sidebarProjects,
+              knownLowerNames,
+              lowerToCanonical,
+              outProjects,
+              outConvs,
+              '',
+              ''
+            );
+          }
+          if (stVal.trajectorySummaries && typeof stVal.trajectorySummaries === 'object') {
+            const rawSummaries =
+              stVal.trajectorySummaries.summaries &&
+              typeof stVal.trajectorySummaries.summaries === 'object'
+                ? stVal.trajectorySummaries.summaries
+                : stVal.trajectorySummaries;
+            ingestTrajectorySummaries(rawSummaries, { isAuthoritative: false });
+            scanArbitraryDataTree(
+              rawSummaries,
+              knownLowerNames,
+              lowerToCanonical,
+              outProjects,
+              outConvs,
+              '',
+              ''
+            );
+          }
+          if (stVal.userStatus && typeof stVal.userStatus === 'object') {
+            ingestTelemetryDataTree({ userStatus: stVal.userStatus }, { source: 'fiber' });
+          }
+        }
         scanArbitraryDataTree(stVal, knownLowerNames, lowerToCanonical, outProjects, outConvs, '', '');
         ingestTelemetryDataTree(stVal, { source: 'fiber' });
       } catch {}
@@ -3850,6 +4679,9 @@
         title: conv.title,
         state: conv.state,
         confirmedDetail: Boolean(conv.isDetailRecord),
+        confirmedNotWaiting: Boolean(
+          conv.state === 'running' && (conv.isDetailRecord || conv.hasExplicitEmptyWaitingSteps)
+        ),
         reasonCode: conv.reasonCode || 'reasonMemIdle',
         reasonVars,
         reason: conv.reason || (conv.timeText ? `Active ${conv.timeText}` : 'Idle (memory sync)'),
@@ -3879,15 +4711,37 @@
     }, 50);
   }
 
-  // 跨世界同步桥接协议（内置 500ms 短时缓存，路由变化自动失效）
+  // 跨世界同步桥接协议（内置 500ms 短时缓存，路由或主机变化自动失效，支持强制刷新）
   window.addEventListener('__AGY_BRIDGE_REQ__', () => {
     try {
       const rootEl = document.documentElement;
       if (!rootEl) return;
+      const forceRefresh = rootEl.getAttribute('data-agy-bridge-force') === '1';
+      if (forceRefresh) {
+        rootEl.removeAttribute('data-agy-bridge-force');
+      }
+
+      const hostMatch = (window.location.pathname || '').match(/^\/r\/([^/?#]+)/);
+      const nextHostPath = hostMatch ? hostMatch[1] : '';
+      if (lastBridgeHostPath && nextHostPath && nextHostPath !== lastBridgeHostPath) {
+        netConvsById.clear();
+        netProjectsById.clear();
+        netProjectsByName.clear();
+        quotaHistoryByPool.gemini.length = 0;
+        quotaHistoryByPool.premium.length = 0;
+        authoritativeTrajectoryIds = null;
+        lastBridgeCacheTs = 0;
+        netDataDirty = true;
+      }
+      if (nextHostPath) {
+        lastBridgeHostPath = nextHostPath;
+      }
+
       const rawIn = rootEl.getAttribute('data-agy-bridge-in') || '[]';
       const routeKey = `${window.location.pathname || ''}${window.location.search || ''}::${rawIn}`;
       const now = Date.now();
       if (
+        !forceRefresh &&
         !netDataDirty &&
         routeKey === lastBridgeNamesKey &&
         lastBridgeResultJson &&
@@ -3914,6 +4768,65 @@
       try {
         document.documentElement?.setAttribute(
           'data-agy-bridge-out',
+          JSON.stringify({ ok: false, error: String(err) })
+        );
+      } catch {}
+    }
+  });
+
+  // P1 精确步级用量增量采集通道（仅按需读取游标后的精确主模型步，不膨胀 500ms 轮询载荷）
+  window.addEventListener('__AGY_BRIDGE_LEDGER_REQ__', () => {
+    try {
+      const rootEl = document.documentElement;
+      if (!rootEl) return;
+      const rawIn = rootEl.getAttribute('data-agy-ledger-in') || '{}';
+      let cursors = {};
+      try {
+        const parsed = JSON.parse(rawIn);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          cursors = parsed;
+        }
+      } catch {}
+
+      const batches = [];
+      for (const [convId, entry] of convTelemetryById.entries()) {
+        if (!isEligibleLedgerConvId(convId)) continue;
+        if (!(entry?.pricedStepLog instanceof Map) || entry.pricedStepLog.size === 0) continue;
+
+        const allSorted = Array.from(entry.pricedStepLog.values()).sort(
+          (a, b) => a.idx - b.idx
+        );
+        if (allSorted.length === 0) continue;
+
+        const cursorVal =
+          typeof cursors[convId] === 'number' && Number.isFinite(cursors[convId])
+            ? cursors[convId]
+            : null;
+        const minIdx = cursorVal !== null ? Math.max(0, cursorVal - 3) : 0;
+        const steps = allSorted.filter((st) => st.idx >= minIdx);
+        if (steps.length === 0) continue;
+
+        const s0 = allSorted[0];
+        const sigModel = String(s0.m || s0.ml || 'unknown').trim().toLowerCase();
+        const firstSig = `${sigModel}:${s0.idx}:${s0.in}:${s0.cr}:${s0.cw}:${s0.out}:${s0.rs}:${s0.ts || 0}`;
+        const netRec = netConvsById.get(`id::${convId}`);
+        const projectName = String(
+          netRec?.projectName || netRec?.workspaceNames?.[0] || ''
+        ).trim();
+
+        batches.push({
+          convId,
+          projectName,
+          firstSig,
+          steps
+        });
+      }
+
+      rootEl.setAttribute('data-agy-ledger-out', JSON.stringify({ ok: true, batches }));
+    } catch (err) {
+      try {
+        document.documentElement?.setAttribute(
+          'data-agy-ledger-out',
           JSON.stringify({ ok: false, error: String(err) })
         );
       } catch {}

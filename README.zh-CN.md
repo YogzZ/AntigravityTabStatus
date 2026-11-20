@@ -1,6 +1,6 @@
 [English](./README.md) | **简体中文**
 
-# Antigravity Tab Status (`v2.9.0`)
+# Antigravity Tab Status (`v2.10.0`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-34a853.svg)](./manifest.json)
@@ -12,14 +12,19 @@
 
 ---
 
-## 核心特性 (`v2.9.0`)
+## 核心特性 (`v2.10.0`)
 
-- **5 小时模型配额池、上下文占用与实时 `tok/s` 速率遥测**
-  - **5h 配额池概览条：** 在弹窗与侧边栏顶部通过原生 `<progress>` 状态条展示 `Gemini` 与 `Claude / GPT` 配额池的剩余百分比与重置倒计时。
-  - **单对话上下文与速率徽标：** 在对话行内展示上下文 Token 用量（`used/limit, pct%`）、实时 `tok/s` 生成速率、自动压缩降幅提示（`-drop%`），并在存在真实 `modelUsage` 快照时提供缓存 / 输入 / 输出 / 命中率明细（无快照时诚实标注 `~` 估算，绝不伪造缓存命中率）。
+- **本地持久化 Token 账本、离线计价与分析抽屉**
+  - **高水位去重用量账本（`agyUsageLedgerV1`）：** 仅在本地 `chrome.storage.local` 聚合记录输入、输出、推理及分档 `5m`/`1h` 缓存 Token（最多 300 条会话高水位去重、90 天滚动保留、`< 250 KB` 体积上限，绝不保存提示词或回复正文）。
+  - **100% 离线定价引擎（`pricing.js`）：** 支持 `USD` / `CNY` 等效 API 价值与缓存节省估算，并可自定义模型 `/ 1M` 单价覆盖（`agyPricingConfigV1`）。
+  - **折叠式用量分析抽屉（`#usageDrawer`）：** 提供 `今日 | 7 天 | 30 天` KPI 统计、SVG 趋势柱状图、28 天热力图、热门模型/项目排行、防公式注入的 CSV / JSON 导出及两步确认清空历史。
+- **5 小时模型配额池（速率/ETA）、上下文遥测与缓存保鲜倒计时**
+  - **5h 配额概览与可选桌面提醒：** 展示 `Gemini` 与 `Claude / GPT` 配额池的剩余比例、重置倒计时、消耗速率 `Pace` 徽标、耗尽 `ETA` 预测及重置前余量提示；支持按需开启 **配额桌面提醒**（`optional_permissions: ["notifications"]`，默认关闭），在配额恢复或重置前余量较多时本地提醒。
+  - **单对话上下文、速率与 `coldAfter` 倒计时：** 在对话行内展示上下文 Token 占用（`used/limit, pct%`）、实时 `tok/s` 速率、自动压缩降幅（`-drop%`）、`5m`/`1h` 提示词缓存保鲜倒计时（`warm` / `cooling` / `cold`），以及精确 Cache / In / Out / 命中率与会话等效费用提示（无真实快照时诚实标注 `~` 估算）。
   - **可选页内输入框用量胶囊（默认关闭）：** 在设置中开启 **「页面输入框显示用量胶囊」**（`showInPageCapsule`）后，可在输入工具栏旁挂载完全隔离的 Shadow DOM 胶囊（`WeakMap` 驱动、零 `innerHTML`/`localStorage`、符合 WCAG 1.4.13 悬停/键盘/`Escape` 提示交互）。
-- **按需授权本地桌面端（localhost）支持**
+- **按需授权本地桌面端（localhost）与可选只读本地 Magpie 网关**
   - 在设置中点击 **「本地 Antigravity (localhost) -> 授权启用」** 即可按需授予 `http://localhost/*` 与 `http://127.0.0.1/*` 可选主机权限（`optional_host_permissions` + `scripting`），并支持随时撤销。即使已授权，脚本也会校验 Antigravity 宿主标识（`isVerifiedLocalAntigravity()`），对无关本地开发服务完全静默无侵入。
+  - 可在用量抽屉中按需启用只读 **本地 Magpie 网关** 卡片（`agyMagpieConfigV1`，默认关闭），仅对受检本地回环地址发起只读 `GET` 轮询，且绝不污染 Antigravity 用量账本。
 
 - **跨网页全局面板 & 常驻 Chrome Side Panel**
   - **任意网页随时看：** 浏览任何网页时，浏览器工具栏都会实时显示汇总的 `待处理 + 未读` 全局角标；点击扩展图标即可直接查看后台 Antigravity 实例、项目与对话进度，无需再切换标签页反复确认。
@@ -74,7 +79,7 @@
 ### 方式二：从源码校验并本地打包
 
 1. 克隆本仓库（`git clone https://github.com/YogzZ/AntigravityTabStatus.git`）。
-2. *（可选）* 运行一键校验并生成纯净发布包（输出到 `dist/antigravity-tab-status-v2.9.0.zip`）：
+2. *（可选）* 运行一键校验并生成纯净发布包（输出到 `dist/antigravity-tab-status-v2.10.0.zip`）：
    ```bash
    node scripts/verify.mjs
    bash scripts/package.sh
@@ -109,25 +114,28 @@ Antigravity 页面与子框架 (ISOLATED 世界)
 
 | 文件 / 目录 | 说明 |
 | :--- | :--- |
-| `manifest.json` | Manifest V3 配置（`v2.9.0`）、`default_locale: "en"`、`storage` + `sidePanel` + `scripting` 权限、受限 `host_permissions`、按需 `optional_host_permissions`（`localhost`/`127.0.0.1`）、`MAIN` 与 `ISOLATED` 脚本声明 |
-| `background.js` | MV3 Service Worker：`agy-timer` Port 计时器、`OffscreenCanvas` 图标像素解码、`storage.session` 全局数字角标汇总、`actionClickMode` 同步、按需 localhost 动态脚本注册/注入及跨框架消息转发 |
-| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber、状态存储、被动只读网络流桥接器（500ms 缓存、40 对话步数摘要上限）、受控同源 Connect-RPC 及 v2.9.0 配额/上下文/tok/s 遥测引擎 |
-| `i18n.js` | 浏览器语言自动识别与 161 键 10 语言词典（`window.__AGY_I18N__`），含 Antigravity 与按需 localhost 宿主校验守卫 |
-| `scanner.js` | 统一工作区扫描器，融合 DOM、内存桥接快照与遥测、已折叠项目缓存及可选隔离 Shadow DOM 用量胶囊 |
+| `manifest.json` | Manifest V3 配置（`v2.10.0`）、`default_locale: "en"`、`storage` + `sidePanel` + `scripting` 权限、按需 `optional_permissions`（`notifications`）与 `optional_host_permissions`（`localhost`/`127.0.0.1`）、受限 `host_permissions`、`MAIN` 与 `ISOLATED` 脚本声明 |
+| `background.js` | MV3 Service Worker：`agy-timer` Port 计时器、`OffscreenCanvas` 图标像素解码、`storage.session` 全局数字角标汇总、`actionClickMode` 同步、用量账本与通知状态串行持久化、按需 localhost 动态脚本注册/注入、只读本地 Magpie 轮询及跨框架消息转发 |
+| `pricing.js` | 通用离线计价、汇率换算（`USD`/`CNY`）、`agyUsageLedgerV1` 去重汇总、提示词缓存 `coldAfter` 评估、配额通知状态机与回环 Magpie 地址校验模块（`globalThis.__AGY_PRICING__`） |
+| `page-bridge.js` | `world: "MAIN"` React 18/19 Fiber、状态存储、被动只读网络流桥接器（500ms 缓存、40 对话步数摘要上限）、受控同源 Connect-RPC、双轨 Token/耗时遥测及已计价步数增量采集 |
+| `i18n.js` | 浏览器语言自动识别与 282 键 10 语言词典（`globalThis.__AGY_I18N__`），同时支持内容脚本、面板界面与 Service Worker，含 Antigravity 与按需 localhost 宿主校验守卫 |
+| `scanner.js` | 统一工作区扫描器，融合 DOM、内存桥接快照与遥测、已折叠项目缓存、账本增量采集及可选隔离 Shadow DOM 用量胶囊 |
 | `content.js` | 顶层全局状态与遥测合并引擎、64x64 Canvas 渲染器（6 种风格 × 2 种挂载模式）、旧标题后缀清理、Shadow DOM 胶囊同步与 Port 动画驱动 |
-| `frame-detector.js` | 子工作区 iframe 扫描、遥测转发与子框架 Shadow DOM 胶囊同步脚本 |
-| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | 适配浅色/深色与无障碍的双形态面板 UI（快捷弹窗 + `100dvh` 响应式侧边栏），提供 5h 配额池概览、单对话上下文/速率/压缩徽标、跨网页实例切换、项目对话一键直达、2×3 风格选择器、可选 localhost 授权控制、预览与诊断 |
+| `frame-detector.js` | 子工作区 iframe 扫描、遥测与账本增量转发及子框架 Shadow DOM 胶囊同步脚本 |
+| `popup.html` / `sidepanel.html` / `popup.css` / `popup.js` | 适配浅色/深色与无障碍的双形态面板 UI（快捷弹窗 + `100dvh` 响应式侧边栏），提供 5h 配额速率/ETA 概览、单对话上下文/速率/压缩/`coldAfter` 徽标、折叠式 `#usageDrawer` 用量分析抽屉、跨网页实例切换、项目对话一键直达、2×3 风格选择器、可选 localhost/通知/Magpie 控制、预览与诊断 |
 | `_locales/` | Chrome 扩展多语言元数据目录（`en`、`zh_CN`、`zh_TW`、`ja`、`ko`、`es`、`fr`、`de`、`pt_BR`、`ru`） |
 | `icons/` | 扩展图标资源（`16x16`、`32x32`、`48x48`、`128x128`） |
 | `AGENTS.md` | 开发者与 AI Agent 协作规范、浏览器支持策略、CSP/MV3 约束及校验打包命令 |
 | `PLAN.md` | v2.6.0–v2.9.0 架构拆解与开源演进路线图 |
+| `docs/` | P0/P1/P2 遥测、账本、离线计价、配额通知、缓存保鲜与 Magpie 技术规范文档 |
 | `CHANGELOG.md` | 遵循 Keep a Changelog 规范的版本更新日志 |
-| `PRIVACY.md` | 隐私政策及本地存储 / 权限使用说明 |
+| `PRIVACY.md` | 隐私政策及 `chrome.storage.sync` / `local` / `session` 与权限使用说明 |
 | `CHROMEWEBSTORE.md` | Chrome / Edge 扩展商店上架文案、权限说明及提审清单 |
 | `LICENSE` | MIT 开源许可证 |
-| `scripts/verify.mjs` | 零第三方依赖 Node 校验脚本（语法、MV3 与可选权限范围、10 语言 161 键、CSP/安全、PNG 完整性与敏感信息扫描） |
+| `scripts/verify.mjs` | 零第三方依赖 Node 校验脚本（语法、MV3 与可选权限范围、10 语言 282 键、`pricing.js` 沙箱与 Magpie 回环校验、CSP/安全、PNG 完整性与敏感信息扫描） |
 | `scripts/package.sh` | 自动运行校验并在 `dist/` 生成仅含运行时文件的纯净发布 `.zip` 包 |
 | `.github/workflows/ci.yml` | GitHub Actions 自动校验与构建工作流 |
+| `.github/workflows/release.yml` | GitHub Actions 版本 Tag（`v*.*.*`）触发的自动校验、校验版本号一致性并发布带 `.zip` 附件的 GitHub Release 工作流 |
 | `.gitignore` | Git 忽略规则（系统缓存、构建目录 `dist/`、`*.zip` / `*.crx` / `*.pem`、依赖及编辑器配置） |
 
 ---
@@ -140,7 +148,7 @@ Antigravity 页面与子框架 (ISOLATED 世界)
 # 运行脚本语法、manifest 权限范围、10 语言 i18n、CSP/安全、PNG 图标及敏感信息扫描
 node scripts/verify.mjs
 
-# 执行全量校验并构建纯净发布包 dist/antigravity-tab-status-v2.9.0.zip
+# 执行全量校验并构建纯净发布包 dist/antigravity-tab-status-v2.10.0.zip
 bash scripts/package.sh
 ```
 
